@@ -65,7 +65,7 @@ func wasSet(names ...string) bool {
 
 func usage() {
 	out := flag.CommandLine.Output()
-	fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+	fmt.Fprintf(out, "Usage of %s:\n", filepath.Base(os.Args[0]))
 	for _, g := range flagGroups {
 		var spell []string
 		for _, n := range g.names {

@@ -1,0 +1,11 @@
+# Regenerate README.md from `gp --help` so the Usage section can't drift from
+# the flag definitions. Install once: pre-commit install.
+repos:
+  - repo: local
+    hooks:
+      - id: gen-readme
+        name: gen README from gp --help
+        entry: ./gen-readme.sh
+        language: system
+        always_run: true
+        pass_filenames: false
