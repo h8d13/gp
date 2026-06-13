@@ -21,5 +21,4 @@ Usage of gp:
 
 ## Configuration
 
-Keys resolve in order: real env > .env > ini > default. See gpconfig.ini for
-the annotated sample (XDG path: $XDG_CONFIG_HOME/gp/gpconfig.ini).
+Keys resolve in order: real `env` > `.env` > `$XDG_CONFIG_HOME/gp/gpconfig.ini` > defaults.

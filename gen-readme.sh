@@ -13,6 +13,7 @@ fence='```'
 # file avoids truncating readme.md while awk is still reading it.
 {
 	awk -v m="$marker" '$0 == m { exit } { print }' readme.md
+	# Expanded heredoc for the generated parts (marker, fences, help)...
 	cat <<EOF
 $marker
 
@@ -21,10 +22,12 @@ $marker
 $fence
 $help
 $fence
+EOF
+	# ...then a quoted heredoc so the prose backticks and $vars stay literal.
+	cat <<'EOF'
 
 ## Configuration
 
-Keys resolve in order: real env > .env > ini > default. See gpconfig.ini for
-the annotated sample (XDG path: \$XDG_CONFIG_HOME/gp/gpconfig.ini).
+Keys resolve in order: real `env` > `.env` > `$XDG_CONFIG_HOME/gp/gpconfig.ini` > defaults.
 EOF
 } > readme.md.tmp && mv readme.md.tmp readme.md
