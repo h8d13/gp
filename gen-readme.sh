@@ -28,6 +28,6 @@ EOF
 
 ## Configuration
 
-Keys resolve in order: real `env` > `.env` > `$XDG_CONFIG_HOME/gp/gpconfig.ini` > defaults.
+Keys resolve in order: real `env` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/gpconfig.ini` > fallback defaults.
 EOF
 } > readme.md.tmp && mv readme.md.tmp readme.md
