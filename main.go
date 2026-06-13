@@ -172,8 +172,9 @@ func main() {
 		req.Header.Set("User-Agent", p.UserAgent)
 	}
 
+	rp := p.retry()
 	start := time.Now()
-	resp, err := doRetry(client, req, p.Retries)
+	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fetch:", err)
 		os.Exit(1)
@@ -196,7 +197,7 @@ func main() {
 		// Split only when it can pay off and offset-writes are possible.
 		if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
 			resp.Body.Close() // drop the probe stream; range requests refetch from 0
-			n, err = parallelDownload(client, resp.Request.URL.String(), p.UserAgent, f, resp.ContentLength, p.Parallel, p.Retries)
+			n, err = parallelDownload(client, resp.Request.URL.String(), p.UserAgent, f, resp.ContentLength, p.Parallel, rp)
 		} else {
 			n, err = io.Copy(f, resp.Body)
 		}

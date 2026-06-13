@@ -25,7 +25,7 @@ func rangeable(resp *http.Response) bool {
 // parallelDownload fetches url into f over conns byte-range requests, each
 // writing its slice at the correct offset. Returns total bytes written.
 // Assumes size > 0 and that the server honors ranges (see rangeable).
-func parallelDownload(client *http.Client, url, ua string, f *os.File, size int64, conns, retries int) (int64, error) {
+func parallelDownload(client *http.Client, url, ua string, f *os.File, size int64, conns int, rp retryPolicy) (int64, error) {
 	chunk := size / int64(conns)
 	var total int64
 	errs := make([]error, conns)
@@ -40,7 +40,7 @@ func parallelDownload(client *http.Client, url, ua string, f *os.File, size int6
 		wg.Add(1)
 		go func(i int, start, end int64) {
 			defer wg.Done()
-			n, err := fetchRange(client, url, ua, f, start, end, retries)
+			n, err := fetchRange(client, url, ua, f, start, end, rp)
 			atomic.AddInt64(&total, n)
 			errs[i] = err
 		}(i, start, end)
@@ -57,7 +57,7 @@ func parallelDownload(client *http.Client, url, ua string, f *os.File, size int6
 
 // fetchRange GETs bytes [start,end] of url and writes them at offset start
 // in f. Concurrent calls at disjoint offsets are safe: WriteAt is pwrite.
-func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, retries int) (int64, error) {
+func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, rp retryPolicy) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -66,7 +66,7 @@ func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int6
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
-	resp, err := doRetry(client, req, retries)
+	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		return 0, err
 	}
