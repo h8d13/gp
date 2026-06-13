@@ -5,15 +5,37 @@ package main
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
+// configPath resolves the ini location per the XDG Base Directory spec:
+// $XDG_CONFIG_HOME/gp/gpconfig.ini, else ~/.config/gp/gpconfig.ini.
+// XDG_CONFIG_HOME is honored only when absolute (spec requirement);
+// a relative or unset value falls back to ~/.config.
+func configPath() string {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(dir) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "gp", "gpconfig.ini")
+}
+
 // prefs is the typed view of [pref]: the single place where keys,
 // defaults, and their meaning live. Extend here when adding a key.
 type prefs struct {
-	AllowInsecure bool // skip TLS cert verification (default false)
-	AlwaysEncrypt bool // scheme-less URLs get https:// (default true)
+	AllowInsecure bool   // skip TLS cert verification (default false)
+	AlwaysEncrypt bool   // scheme-less URLs get https:// (default true)
+	UserAgent     string // User-Agent header; "" leaves Go's default
+	Parallel      int    // range-download connections; 1 (default) disables
+	ParallelMin   int    // min body size in bytes to split (default 8 MiB)
+	Quic          bool   // speak HTTP/3 over QUIC instead of h1/h2 (default false)
+	Retries       int    // retries on 429/503 with backoff (default 3)
 }
 
 // loadPrefs reads .env then ini and resolves all [pref] keys.
@@ -24,10 +46,14 @@ func loadPrefs(iniPath, envPath string) prefs {
 	return prefs{
 		AllowInsecure: cfg.boolOr("pref", "allow-insecure", false),
 		AlwaysEncrypt: cfg.boolOr("pref", "always-encrypt", true),
+		UserAgent:     cfg.get("user", "user-agent"),
+		Parallel:      cfg.intOr("pref", "parallel", 1),
+		ParallelMin:   cfg.intOr("pref", "parallel-min", 8<<20),
+		Quic:          cfg.boolOr("pref", "quic", false),
+		Retries:       cfg.intOr("pref", "retries", 3),
 	}
 }
 
-// config holds ini sections as section -> key -> value.
 type config map[string]map[string]string
 
 // loadConfig parses the ini file once. Missing file means empty config.
@@ -77,6 +103,15 @@ func (c config) get(section, key string) string {
 // falling back to def when missing or malformed.
 func (c config) boolOr(section, key string, def bool) bool {
 	if v, err := strconv.ParseBool(c.get(section, key)); err == nil {
+		return v
+	}
+	return def
+}
+
+// intOr parses section/key as an int, falling back to def when missing
+// or malformed.
+func (c config) intOr(section, key string, def int) int {
+	if v, err := strconv.Atoi(c.get(section, key)); err == nil {
 		return v
 	}
 	return def
