@@ -65,7 +65,8 @@ func wasSet(names ...string) bool {
 
 func usage() {
 	out := flag.CommandLine.Output()
-	fmt.Fprintf(out, "Usage of %s:\n", filepath.Base(os.Args[0]))
+	bin := filepath.Base(os.Args[0])
+	fmt.Fprintf(out, "Usage: %s [flags] [url]   (url defaults to example.com)\n\n", bin)
 	for _, g := range flagGroups {
 		var spell []string
 		for _, n := range g.names {
@@ -131,11 +132,11 @@ func main() {
 	var out string
 	strVar(&out, "", "save response body to file", "o", "output")
 	var par int
-	intVar(&par, -1, "parallel connections, overrides config; 1 disables (needs -o)", "p", "parallel")
+	intVar(&par, -1, "parallel connections; 1 disables (needs -o)", "p", "parallel")
 	var useQuic bool
-	boolVar(&useQuic, false, "use HTTP/3 over QUIC, overrides config", "q", "quic")
+	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
 	var ret int
-	intVar(&ret, -1, "retries on 429/503, overrides config; 0 disables", "r", "retries")
+	intVar(&ret, -1, "retries on 429/503; 0 disables", "r", "retries")
 	flag.Usage = usage
 	flag.Parse()
 
