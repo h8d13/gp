@@ -213,5 +213,9 @@ func main() {
 		}
 	}
 
-	fmt.Printf("%s %s proto=%s bytes=%d in %v\n", url, resp.Status, resp.Proto, n, time.Since(start))
+	dest := ""
+	if out != "" {
+		dest = " saved=" + out
+	}
+	fmt.Printf("%s %s proto=%s bytes=%d in %v%s\n", url, resp.Status, resp.Proto, n, time.Since(start), dest)
 }
