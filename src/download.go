@@ -2,7 +2,7 @@
 // helps when the bottleneck is per-connection (CDN throttle, high-BDP
 // path); for small bodies the extra handshakes lose, so callers gate on
 // size via prefs.ParallelMin before reaching here.
-package main
+package src
 
 import (
 	"fmt"
@@ -25,7 +25,7 @@ func rangeable(resp *http.Response) bool {
 // parallelDownload fetches url into f over conns byte-range requests, each
 // writing its slice at the correct offset. Returns total bytes written.
 // Assumes size > 0 and that the server honors ranges (see rangeable).
-func parallelDownload(client *http.Client, url, ua string, f *os.File, size int64, conns int, rp retryPolicy) (int64, error) {
+func parallelDownload(client *http.Client, url, ua string, f *os.File, size int64, conns int, rp retryPolicy, prog *progress) (int64, error) {
 	chunk := size / int64(conns)
 	var total int64
 	errs := make([]error, conns)
@@ -40,7 +40,7 @@ func parallelDownload(client *http.Client, url, ua string, f *os.File, size int6
 		wg.Add(1)
 		go func(i int, start, end int64) {
 			defer wg.Done()
-			n, err := fetchRange(client, url, ua, f, start, end, rp)
+			n, err := fetchRange(client, url, ua, f, start, end, rp, prog)
 			atomic.AddInt64(&total, n)
 			errs[i] = err
 		}(i, start, end)
@@ -57,7 +57,7 @@ func parallelDownload(client *http.Client, url, ua string, f *os.File, size int6
 
 // fetchRange GETs bytes [start,end] of url and writes them at offset start
 // in f. Concurrent calls at disjoint offsets are safe: WriteAt is pwrite.
-func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, rp retryPolicy) (int64, error) {
+func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, rp retryPolicy, prog *progress) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -74,5 +74,5 @@ func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int6
 	if resp.StatusCode != http.StatusPartialContent {
 		return 0, fmt.Errorf("range %d-%d: want 206, got %s", start, end, resp.Status)
 	}
-	return io.Copy(io.NewOffsetWriter(f, start), resp.Body)
+	return io.Copy(progWriter{io.NewOffsetWriter(f, start), prog}, resp.Body)
 }
