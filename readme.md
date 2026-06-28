@@ -1,6 +1,8 @@
 # gp
 
 `get-packets` is a small `go` CLI that fetches over HTTP/1, HTTP/2, and HTTP/3.
+Splits big `-o` downloads across parallel range requests and resumes
+interrupted ones from a `.gp-part` sidecar.
 
 ---
 <!-- gp-help:begin (generated; edit flags or gen-readme.sh, not below) -->
@@ -18,6 +20,8 @@ Usage: gp [flags] [url]   (url defaults to example.com)
     	use HTTP/3 over QUIC
   -r, --retries int
     	retries on 429/503; 0 disables
+  -c, --chunk int
+    	split/resume chunk size in bytes
 ```
 
 ## Configuration

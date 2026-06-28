@@ -137,6 +137,8 @@ func main() {
 	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
 	var ret int
 	intVar(&ret, -1, "retries on 429/503; 0 disables", "r", "retries")
+	var chk int
+	intVar(&chk, -1, "split/resume chunk size in bytes", "c", "chunk")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -149,6 +151,9 @@ func main() {
 	}
 	if ret >= 0 {
 		p.Retries = ret
+	}
+	if chk > 0 {
+		p.ChunkBytes = chk
 	}
 
 	url := "example.com"
@@ -188,19 +193,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "save:", err)
 			os.Exit(1)
 		}
-		f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "save:", err)
-			os.Exit(1)
-		}
-		defer f.Close()
 
-		// Split only when it can pay off and offset-writes are possible.
+		// Split only when it can pay off and offset-writes are possible;
+		// that path also owns the output file and handles resume.
 		if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
-			resp.Body.Close() // drop the probe stream; range requests refetch from 0
-			n, err = parallelDownload(client, resp.Request.URL.String(), p.UserAgent, f, resp.ContentLength, p.Parallel, rp)
+			resp.Body.Close() // drop the probe stream; range requests refetch
+			n, err = saveSplit(client, resp, out, p, rp)
 		} else {
-			n, err = io.Copy(f, resp.Body)
+			n, err = saveStream(out, resp.Body)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "read:", err)

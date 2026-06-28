@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -339,7 +340,9 @@ func TestParallelDownloadSplitsAndReassembles(t *testing.T) {
 	defer srv.Close()
 
 	dst := filepath.Join(t.TempDir(), "out.bin")
-	env := gpEnvWith(t, "PARALLEL="+strconv.Itoa(conns), "PARALLEL_MIN=1")
+	// chunk = body/conns so the split is exactly `conns` concurrent ranges.
+	chunk := strconv.Itoa(len(body) / conns)
+	env := gpEnvWith(t, "PARALLEL="+strconv.Itoa(conns), "PARALLEL_MIN=1", "CHUNK_BYTES="+chunk)
 	out, code := run(t, t.TempDir(), env, "-o", dst, srv.URL)
 	if code != 0 {
 		t.Fatalf("exit=%d out=%q", code, out)
@@ -400,5 +403,144 @@ func TestParallelDisabledStaysSingleStream(t *testing.T) {
 	}
 	if mc := rs.maxConc(); mc != 1 {
 		t.Errorf("maxConc=%d, want 1 (PARALLEL=1 disables splitting)", mc)
+	}
+}
+
+// etagRangeServer serves body with an ETag and records every Range header it
+// receives, so a test can assert exactly which chunks were (re)fetched. The
+// initial no-Range probe returns 200 and is not recorded.
+type etagRangeServer struct {
+	body   []byte
+	etag   string
+	mu     sync.Mutex
+	ranges []string
+}
+
+func (s *etagRangeServer) gotRanges() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.ranges...)
+}
+
+func (s *etagRangeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("ETag", s.etag)
+	lo, hi := 0, len(s.body)-1
+	status := http.StatusOK
+	if rng := r.Header.Get("Range"); rng != "" {
+		fmt.Sscanf(rng, "bytes=%d-%d", &lo, &hi)
+		s.mu.Lock()
+		s.ranges = append(s.ranges, rng)
+		s.mu.Unlock()
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", lo, hi, len(s.body)))
+		status = http.StatusPartialContent
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(hi-lo+1))
+	w.WriteHeader(status)
+	w.Write(s.body[lo : hi+1])
+}
+
+// writeManifest hand-writes a .gp-part sidecar in gp's on-disk shape. The
+// e2e suite is black-box, so it can't import the manifest type; the JSON
+// field names here mirror its json tags.
+func writeManifest(t *testing.T, path string, size, chunk int64, validator string, done []bool) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"size": size, "validator": validator, "chunk": chunk, "done": done,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeRefetchesOnlyMissingChunks(t *testing.T) {
+	const chunk = 64 << 10
+	body := patternBytes(4 * chunk) // chunks 0..3
+	rs := &etagRangeServer{body: body, etag: `"v1"`}
+	srv := httptest.NewServer(rs)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.bin")
+
+	// Pre-seed: chunks 0 and 2 already on disk and marked done; 1 and 3 gap.
+	seed := make([]byte, len(body))
+	copy(seed[0:chunk], body[0:chunk])
+	copy(seed[2*chunk:3*chunk], body[2*chunk:3*chunk])
+	if err := os.WriteFile(dst, seed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, dst+".gp-part", int64(len(body)), chunk, `"v1"`,
+		[]bool{true, false, true, false})
+
+	env := gpEnvWith(t, "PARALLEL=2", "PARALLEL_MIN=1", "CHUNK_BYTES="+strconv.Itoa(chunk))
+	out, code := run(t, dir, env, "-o", dst, srv.URL)
+	if code != 0 {
+		t.Fatalf("exit=%d out=%q", code, out)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("resumed file differs: got %d bytes, want %d", len(got), len(body))
+	}
+
+	want := map[string]bool{
+		fmt.Sprintf("bytes=%d-%d", chunk, 2*chunk-1):   true, // chunk 1
+		fmt.Sprintf("bytes=%d-%d", 3*chunk, 4*chunk-1): true, // chunk 3
+	}
+	ranges := rs.gotRanges()
+	if len(ranges) != len(want) {
+		t.Fatalf("ranges=%v, want only the 2 missing chunks", ranges)
+	}
+	for _, r := range ranges {
+		if !want[r] {
+			t.Errorf("refetched unexpected range %s (only chunks 1,3 should refetch)", r)
+		}
+	}
+
+	if _, err := os.Stat(dst + ".gp-part"); !os.IsNotExist(err) {
+		t.Errorf("manifest not removed after completion: err=%v", err)
+	}
+}
+
+func TestResumeRestartsWhenValidatorChanged(t *testing.T) {
+	const chunk = 64 << 10
+	body := patternBytes(4 * chunk)
+	rs := &etagRangeServer{body: body, etag: `"v2"`}
+	srv := httptest.NewServer(rs)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.bin")
+
+	// Stale local file + manifest from a DIFFERENT remote version (v1).
+	garbage := bytes.Repeat([]byte{0xAA}, len(body))
+	if err := os.WriteFile(dst, garbage, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, dst+".gp-part", int64(len(body)), chunk, `"v1"`,
+		[]bool{true, true, true, true})
+
+	env := gpEnvWith(t, "PARALLEL=4", "PARALLEL_MIN=1", "CHUNK_BYTES="+strconv.Itoa(chunk))
+	out, code := run(t, dir, env, "-o", dst, srv.URL)
+	if code != 0 {
+		t.Fatalf("exit=%d out=%q", code, out)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("stale bytes not replaced after validator change")
+	}
+	if n := len(rs.gotRanges()); n != 4 {
+		t.Errorf("refetched %d chunks, want all 4 (validator changed)", n)
 	}
 }

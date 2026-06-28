@@ -34,6 +34,7 @@ type prefs struct {
 	UserAgent     string // User-Agent header; "" leaves Go's default
 	Parallel      int    // range-download connections; 1 (default) disables
 	ParallelMin   int    // min body size in bytes to split (default 8 MiB)
+	ChunkBytes    int    // resume/split chunk size in bytes (default 4 MiB)
 	Quic          bool   // speak HTTP/3 over QUIC instead of h1/h2 (default false)
 	Retries       int    // retries on 429/503 with backoff (default 3)
 	RetryBaseMs   int    // first backoff step in ms when no Retry-After (default 500)
@@ -51,6 +52,7 @@ func loadPrefs(iniPath, envPath string) prefs {
 		UserAgent:     cfg.get("user", "user-agent"),
 		Parallel:      cfg.intOr("pref", "parallel", 1),
 		ParallelMin:   cfg.intOr("pref", "parallel-min", 8<<20),
+		ChunkBytes:    cfg.intOr("pref", "chunk-bytes", 4<<20),
 		Quic:          cfg.boolOr("pref", "quic", false),
 		Retries:       cfg.intOr("pref", "retries", 3),
 		RetryBaseMs:   cfg.intOr("pref", "retry-base-ms", 500),
