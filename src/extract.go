@@ -1,9 +1,15 @@
 // Tar extraction for downloaded archives. The tar payload may be raw or
 // wrapped in gzip, zstd, xz, or bzip2; the codec is picked by magic bytes, not
 // the filename, so a mislabeled archive still unpacks. gzip and bzip2 are
-// stdlib; zstd and xz are pure-Go (no cgo) third-party readers. Every entry
-// path is validated to stay within destDir, so a hostile archive cannot escape
-// via "../" or an absolute path or a symlink (the classic "Zip Slip").
+// stdlib; zstd and xz are pure-Go (no cgo) third-party readers.
+//
+// Two layers keep a hostile archive inside destDir (the classic "Zip Slip"):
+// safeJoin rejects a lexical escape in the entry name ("../" or an absolute
+// path), and within() rejects an escape through a symlink, where one entry
+// makes a link pointing out of destDir and a later entry writes through it.
+// Symlinks themselves may point anywhere (a rootfs tarball legitimately ships
+// absolute links like /etc/machine-id); they are inert until something writes
+// through them, and within() blocks exactly that.
 package src
 
 import (
@@ -135,10 +141,57 @@ func safeJoin(dir, name string) (string, error) {
 	return target, nil
 }
 
-// writeEntry materializes one tar entry. Directories and regular files
-// are created; symlinks are created only when their target is relative and
-// resolves inside destDir; other types (devices, fifos, hardlinks) are skipped.
+// within reports whether target stays inside destDir once the symlinks on its
+// existing ancestors are resolved. safeJoin only checks the name lexically; a
+// prior entry may have planted a symlink ancestor pointing out of destDir, so
+// the lexical path looks contained while the real one escapes. Resolving the
+// deepest existing ancestor catches that. destDir exists by the time any entry
+// is written, so it always anchors the walk.
+func within(destDir, target string) (bool, error) {
+	root, err := filepath.EvalSymlinks(destDir)
+	if err != nil {
+		return false, err
+	}
+	if target == filepath.Clean(destDir) {
+		return true, nil // the archive's own "." entry: destDir itself
+	}
+	// The entry is created inside target's parent, so resolve the deepest
+	// existing ancestor of that parent and require it to stay under root.
+	// Resolving the parent (not target) avoids tripping on a legitimate symlink
+	// leaf, whose own destination is allowed to point outside.
+	for p := filepath.Dir(target); ; {
+		if _, err := os.Lstat(p); err == nil {
+			real, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return false, err
+			}
+			return real == root || strings.HasPrefix(real, root+string(os.PathSeparator)), nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p { // reached the filesystem root without an existing ancestor
+			return false, nil
+		}
+		p = parent
+	}
+}
+
+// writeEntry materializes one tar entry. Directories and regular files are
+// created; symlinks are created verbatim (their target may point anywhere, but
+// nothing is ever written through them that escapes destDir; see within). Other
+// types (devices, fifos, hardlinks) are skipped.
 func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
+	switch hdr.Typeflag {
+	case tar.TypeDir, tar.TypeReg, tar.TypeSymlink:
+		// Refuse to create anything whose real (symlink-resolved) location
+		// has escaped destDir.
+		ok, err := within(destDir, target)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("unsafe path escapes %s via a symlink: %q", destDir, hdr.Name)
+		}
+	}
 	switch hdr.Typeflag {
 	case tar.TypeDir:
 		return os.MkdirAll(target, 0o755)
@@ -154,19 +207,6 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 		_, err = io.Copy(f, tr)
 		return err
 	case tar.TypeSymlink:
-		// A symlink escapes destDir two ways: an absolute target, or a
-		// relative one that climbs out with "../". safeJoin catches the
-		// relative case, but it joins the linkname under destDir and so reads
-		// an absolute target as a safe-looking in-dir path while os.Symlink
-		// still stores the raw absolute target. So reject absolute targets
-		// outright, then range-check the relative resolution. Without this a
-		// later entry written through the link lands outside destDir.
-		if filepath.IsAbs(hdr.Linkname) {
-			return fmt.Errorf("unsafe absolute symlink target: %q -> %q", hdr.Name, hdr.Linkname)
-		}
-		if _, err := safeJoin(destDir, filepath.Join(filepath.Dir(hdr.Name), hdr.Linkname)); err != nil {
-			return err
-		}
 		return os.Symlink(hdr.Linkname, target)
 	default:
 		return nil

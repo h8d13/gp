@@ -30,6 +30,9 @@
 #   SERVE_ENCODE advertise this Content-Encoding (gzip/zstd/br) and serve the
 #               already-compressed SERVE_FILE verbatim, with no Accept-Ranges,
 #               to drive gp's --compress decode path.
+#   SERVE_SUMS  path to a checksums file served (as text/plain) for any request
+#               path that ends in ".sha256" or contains "sums", so a source's
+#               sha256-url can resolve an asset's digest without the network.
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
@@ -126,6 +129,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 payload = fh.read()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        sumsfile = os.environ.get("SERVE_SUMS")
+        if sumsfile and (self.path.endswith(".sha256") or "sums" in self.path.lower()):
+            with open(sumsfile, "rb") as fh:
+                payload = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)

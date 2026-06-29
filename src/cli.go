@@ -106,13 +106,18 @@ func printFlags(out io.Writer, global bool) {
 	}
 }
 
-// tlsConfig is the single place TLS policy lives; nil means stdlib
-// defaults. Both transports accept nil, so the insecure switch stays here.
+// tlsConfig is the single place TLS policy lives. It always returns a config
+// (never nil) so every connection shares one session cache: a parallel split's
+// 2..N TLS handshakes then resume the first's session (an abbreviated handshake,
+// one fewer round trip and less CPU per connection). Because the config is
+// custom, the h1/h2 transport must set ForceAttemptHTTP2 to keep h2 (see
+// newClient). The insecure switch also lives here.
 func tlsConfig(p prefs) *tls.Config {
+	cfg := &tls.Config{ClientSessionCache: tls.NewLRUClientSessionCache(0)}
 	if p.AllowInsecure {
-		return &tls.Config{InsecureSkipVerify: true}
+		cfg.InsecureSkipVerify = true
 	}
-	return nil
+	return cfg
 }
 
 // setUserAgent sets req's User-Agent to ua, or leaves Go's default when ua is
@@ -144,6 +149,7 @@ func newClient(p prefs) (*http.Client, func() error) {
 	// Bound only connect and header waits, never the body: a slow or
 	// throttled large download must not be killed mid-transfer.
 	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment, // honor HTTP(S)_PROXY/NO_PROXY
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ForceAttemptHTTP2:     true, // a custom TLSClientConfig otherwise disables h2
@@ -182,6 +188,7 @@ func newSplitClient(p prefs) (*http.Client, func() error) {
 		conns = 1
 	}
 	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment, // honor HTTP(S)_PROXY/NO_PROXY
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
 		TLSClientConfig:       tlsConfig(p),

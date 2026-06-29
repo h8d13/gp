@@ -85,6 +85,7 @@ command -v xz >/dev/null 2>&1 && test_set_prereq XZ
 command -v bzip2 >/dev/null 2>&1 && test_set_prereq BZIP2
 command -v gzip >/dev/null 2>&1 && test_set_prereq GZIP
 command -v brotli >/dev/null 2>&1 && test_set_prereq BROTLI
+command -v sha256sum >/dev/null 2>&1 && test_set_prereq SHA256
 
 # --- config: User-Agent ----------------------------------------------
 test_expect_success 'User-Agent comes from ini [user]' '
@@ -764,6 +765,72 @@ index = http://example.invalid/d/
 dest = $PWD/inst
 " &&
 	gp up; test "$code" != 0 && contains "match or ext" "$out"
+'
+
+# --- up: sha256 verification -----------------------------------------
+# A source may pin a digest (sha256) or point at a published checksums file
+# (sha256-url); the asset is hashed and compared before it reaches dest, so a
+# mismatch aborts the install and records no tag.
+
+test_expect_success 'TAR SHA256' 'up installs when a pinned sha256 matches' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	sum=$(sha256sum app.tgz | cut -d" " -f1) &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256 = $sum
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello &&
+	grep -q "TOOL = v1.0.0" "$LOCK"
+'
+
+test_expect_success 'TAR SHA256' 'up aborts (no install, no lock) when a pinned sha256 mismatches' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256 = 0000000000000000000000000000000000000000000000000000000000000000
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "checksum mismatch" "$out" &&
+	! test -e inst && ! test -e "$LOCK"
+'
+
+test_expect_success 'up rejects a malformed pinned sha256 at load' '
+	write_sources "[TOOL]
+url = http://example.invalid/f.bin
+sha256 = deadbeef
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "64 hex chars" "$out"
+'
+
+test_expect_success 'TAR SHA256' 'up verifies an asset via a sha256-url checksums file' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	sum=$(sha256sum app.tgz | cut -d" " -f1) &&
+	printf "%s  tool-linux-amd64.tar.gz\n" "$sum" >SHA256SUMS &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" \
+		SERVE_SUMS="$PWD/SHA256SUMS" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256-url = $URL/SHA256SUMS
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello &&
+	grep -q "TOOL = v1.0.0" "$LOCK"
 '
 
 test_done

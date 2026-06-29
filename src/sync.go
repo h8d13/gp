@@ -35,6 +35,8 @@ type source struct {
 	as      string   // rename a single-file install to this name (archives ignore it)
 	dest    string   // where to install (extract dir, or file dir for non-tar)
 	extract bool     // force tar extraction even when the name lacks an archive ext
+	sha256  string   // pinned sha256 hex; the asset must hash to this
+	sumURL  string   // URL of a checksums file to look the asset's sha256 up in
 }
 
 // sourcesPath and lockPath live beside config.ini so all gp state is in one
@@ -60,15 +62,17 @@ func loadSources(path string) ([]source, error) {
 	for _, name := range names {
 		sec := cfg[name]
 		s := source{
-			name:  name,
-			url:   sec["url"],
-			index: sec["index"],
-			forge: sec["forge"],
-			host:  sec["host"],
-			repo:  sec["repo"],
-			ext:   sec["ext"],
-			as:    sec["as"],
-			dest:  expandHome(sec["dest"]),
+			name:   name,
+			url:    sec["url"],
+			index:  sec["index"],
+			forge:  sec["forge"],
+			host:   sec["host"],
+			repo:   sec["repo"],
+			ext:    sec["ext"],
+			as:     sec["as"],
+			dest:   expandHome(sec["dest"]),
+			sha256: strings.ToLower(sec["sha256"]),
+			sumURL: sec["sha256-url"],
 		}
 		if f := strings.Fields(sec["match"]); len(f) > 0 {
 			s.match = f
@@ -79,6 +83,12 @@ func loadSources(path string) ([]source, error) {
 		}
 		if strings.ContainsRune(s.as, '/') {
 			return nil, fmt.Errorf("[%s]: as must be a bare filename, not a path", name)
+		}
+		if s.sha256 != "" && s.sumURL != "" {
+			return nil, fmt.Errorf("[%s]: set sha256 or sha256-url, not both", name)
+		}
+		if s.sha256 != "" && !isHex64(s.sha256) {
+			return nil, fmt.Errorf("[%s]: sha256 must be 64 hex chars", name)
 		}
 		// Resolve the source type, in precedence order: a bare url is the file
 		// itself; an index is a listing to pick one file from; otherwise it is
@@ -287,6 +297,11 @@ func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) er
 		if _, err := fetchToFile(client, a.URL, tmp.Name(), p, rp, "DL"); err != nil {
 			return err
 		}
+		// Verify the staged archive before unpacking it: a bad checksum must
+		// never reach s.dest.
+		if err := verifyChecksum(client, s, a, tmp.Name(), p, rp); err != nil {
+			return err
+		}
 		if fi, e := os.Stat(tmp.Name()); e == nil {
 			prog := newProgress(fi.Size(), "XT", p.Progress)
 			prog.run()
@@ -304,6 +319,10 @@ func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) er
 	}
 	out := filepath.Join(s.dest, destName(s, a.Name))
 	if _, err := fetchToFile(client, a.URL, out, p, rp, "DL"); err != nil {
+		return err
+	}
+	if err := verifyChecksum(client, s, a, out, p, rp); err != nil {
+		os.Remove(out) // don't leave an unverified binary in dest
 		return err
 	}
 	return makeExecutableIfRunnable(out)

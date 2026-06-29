@@ -1,3 +1,6 @@
 # built output
 /out
 gp
+
+# reference
+curl/
