@@ -75,6 +75,7 @@ func usage() {
 	// command (the URL form and `up`); download flags only for the URL form.
 	fmt.Fprintf(out, "\nCommands:\n")
 	fmt.Fprintf(out, "  %s up\n    \tinstall/update all tools from sources.ini\n", name)
+	fmt.Fprintf(out, "  %s up check\n    \tvalidate sources.ini and exit (no downloads)\n", name)
 
 	fmt.Fprintf(out, "\nGlobal options (all commands):\n")
 	printFlags(out, true)
@@ -281,9 +282,11 @@ func Main() {
 
 	// The `up` subcommand walks all of sources.ini using the prefs resolved
 	// above, so the download flags (-p, -q, -r, -c, -n) shape its fetches too.
-	// It takes no positional args; anything after `up` is ignored.
+	// A bare `up` installs; `up check` only parses and validates sources.ini
+	// and exits (no network), for a quick config lint. Other trailing args are
+	// ignored.
 	if len(posArgs) > 0 && posArgs[0] == "up" {
-		upMain(p)
+		upMain(p, len(posArgs) > 1 && posArgs[1] == "check")
 		return
 	}
 

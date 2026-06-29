@@ -474,6 +474,32 @@ test_expect_success TAR '-x rejects path traversal (../ escape)' '
 	contains "unsafe path" "$out" && ! test -e ../escaped
 '
 
+# An absolute (or escaping) symlink is created verbatim -- inert until written
+# through -- but a later entry that resolves out of destDir via that symlink is
+# refused. evil -> abs dir, then a file at evil/pwned would land outside dest.
+test_expect_success TAR '-x blocks a write through an escaping symlink' '
+	mkdir escape_target &&
+	ln -s "$PWD/escape_target" evil &&
+	echo PWNED >evil/pwned &&
+	tar cf bad.tar evil evil/pwned &&
+	rm -rf evil escape_target && mkdir escape_target &&
+	export SERVE_FILE="$PWD/bad.tar" && serve http &&
+	gp "$URL" -x dest; test "$code" != 0 &&
+	contains "via a symlink" "$out" && ! test -e escape_target/pwned
+'
+
+# A rootfs tarball legitimately ships absolute symlinks (e.g. Arch bootstrap
+# var/lib/dbus/machine-id -> /etc/machine-id). Those must extract as-is, since
+# nothing writes through them; the rest of the archive unpacks normally.
+test_expect_success TAR '-x extracts an inert absolute symlink verbatim' '
+	ln -s /etc/somewhere link && mkdir realdir && echo hi >realdir/f.txt &&
+	tar cf ok.tar link realdir &&
+	export SERVE_FILE="$PWD/ok.tar" && serve http &&
+	gp "$URL" -x dest && test "$code" = 0 &&
+	test "$(readlink dest/link)" = /etc/somewhere &&
+	test "$(cat dest/realdir/f.txt)" = hi
+'
+
 # --- up: forge release sync ------------------------------------------
 # serve.py SERVE_RELEASE returns a release JSON for the forge "latest" API
 # path (read fresh, so the test embeds the dynamic asset URL after bind), and
@@ -485,6 +511,8 @@ test_expect_success TAR '-x rejects path traversal (../ escape)' '
 # helper: write a github/gitea-shaped release JSON for asset name $1 at the
 # served asset URL, tagged $2, into rel.json
 gh_release() { printf '{"tag_name":"%s","assets":[{"name":"%s","browser_download_url":"%s/dl/%s","size":1}]}' "$2" "$1" "$URL" "$1" >rel.json; }
+# like gh_release but embeds GitHub's per-asset digest field ($3 = sha256 hex).
+gh_release_digest() { printf '{"tag_name":"%s","assets":[{"name":"%s","browser_download_url":"%s/dl/%s","digest":"sha256:%s","size":1}]}' "$2" "$1" "$URL" "$1" "$3" >rel.json; }
 
 test_expect_success TAR 'up installs a github release, extracts it, records the tag' '
 	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
@@ -831,6 +859,98 @@ dest = $PWD/inst
 " &&
 	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello &&
 	grep -q "TOOL = v1.0.0" "$LOCK"
+'
+
+# parseChecksum also accepts binary-mode (*name) and matches on the basename,
+# so a checksums file listing a path still resolves the asset.
+test_expect_success "TAR SHA256" "up verifies via sha256-url (binary-mode star, path name)" '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	sum=$(sha256sum app.tgz | cut -d" " -f1) &&
+	printf "%s *dist/tool-linux-amd64.tar.gz\n" "$sum" >SHA256SUMS &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" \
+		SERVE_SUMS="$PWD/SHA256SUMS" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256-url = $URL/SHA256SUMS
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello
+'
+
+# A lone digest (a per-asset .sha256 file) applies to whatever asset it was
+# fetched for; the .sha256 path is served by SERVE_SUMS.
+test_expect_success "TAR SHA256" "up verifies via sha256-url (bare per-asset digest)" '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	sum=$(sha256sum app.tgz | cut -d" " -f1) &&
+	printf "%s\n" "$sum" >asset.sha256 &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" \
+		SERVE_SUMS="$PWD/asset.sha256" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256-url = $URL/asset.sha256
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello
+'
+
+# A checksums file with no line for the asset is an error, not a silent skip.
+test_expect_success "TAR SHA256" "up errors when sha256-url lists no entry for the asset" '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	printf "%s  someother.tar.gz\n" "$(sha256sum app.tgz | cut -d" " -f1)" >SHA256SUMS &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" \
+		SERVE_SUMS="$PWD/SHA256SUMS" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+sha256-url = $URL/SHA256SUMS
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "no sha256 for" "$out" &&
+	! test -e inst && ! test -e "$LOCK"
+'
+
+# GitHub ships a per-asset digest in the release JSON, so its releases verify
+# with no sha256/sha256-url in the source at all.
+test_expect_success "TAR SHA256" "up verifies a github release asset via its digest field" '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	sum=$(sha256sum app.tgz | cut -d" " -f1) &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release_digest tool-linux-amd64.tar.gz v1.0.0 "$sum" &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/file.txt)" = hello &&
+	grep -q "TOOL = v1.0.0" "$LOCK"
+'
+
+test_expect_success "TAR SHA256" "up aborts when the github release digest mismatches" '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release_digest tool-linux-amd64.tar.gz v1.0.0 0000000000000000000000000000000000000000000000000000000000000000 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "checksum mismatch" "$out" &&
+	! test -e inst && ! test -e "$LOCK"
 '
 
 test_done

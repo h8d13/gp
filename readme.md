@@ -19,6 +19,8 @@ Usage: gp [flags] URL
 Commands:
   gp up
     	install/update all tools from sources.ini
+  gp up check
+    	validate sources.ini and exit (no downloads)
 
 Global options (all commands):
   -p, --parallel int
@@ -47,4 +49,4 @@ Download options (URL form only):
 
 Keys resolve in order:
 
-command-line flags > real `env` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.
+command-line flags > real `ENV` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.

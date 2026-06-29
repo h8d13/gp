@@ -26,11 +26,14 @@ const maxAPIBytes = 8 << 20
 // forges. URL may 302-redirect to a CDN, so the fetch path must follow
 // redirects (the stdlib client does). Size is 0 when the forge omits it
 // (GitLab release links carry no length), which just means an indeterminate
-// progress bar.
+// progress bar. Digest is the asset's sha256 hex when the forge publishes one
+// (GitHub does, as "sha256:<hex>"), so it can be verified with no config; "" if
+// absent (GitLab links, directory indexes, older assets).
 type asset struct {
-	Name string
-	URL  string
-	Size int64
+	Name   string
+	URL    string
+	Size   int64
+	Digest string
 }
 
 // release is the normalized slice of a forge's latest-release payload.
@@ -170,15 +173,18 @@ func fetchLatestRelease(client *http.Client, f forge, host, repo, ua string, rp 
 	return rel, nil
 }
 
-// parseGitHubLike decodes the GitHub/Gitea/Forgejo release shape: a flat
-// assets array with browser_download_url and size.
+// parseGitHubLike decodes the GitHub/Gitea/Forgejo release shape: a flat assets
+// array with browser_download_url, size, and (GitHub) a digest. The digest is
+// "<algo>:<hex>"; only sha256 is kept, since that is what verifyChecksum hashes
+// with. An absent, null, or non-sha256 digest leaves Digest "" (no auto-verify).
 func parseGitHubLike(body []byte) (release, error) {
 	var raw struct {
 		TagName string `json:"tag_name"`
 		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-			Size int64  `json:"size"`
+			Name   string `json:"name"`
+			URL    string `json:"browser_download_url"`
+			Size   int64  `json:"size"`
+			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -186,7 +192,11 @@ func parseGitHubLike(body []byte) (release, error) {
 	}
 	rel := release{TagName: raw.TagName}
 	for _, a := range raw.Assets {
-		rel.Assets = append(rel.Assets, asset{Name: a.Name, URL: a.URL, Size: a.Size})
+		digest, _ := strings.CutPrefix(a.Digest, "sha256:")
+		if !isHex64(digest) {
+			digest = "" // absent, null, or a non-sha256 algorithm
+		}
+		rel.Assets = append(rel.Assets, asset{Name: a.Name, URL: a.URL, Size: a.Size, Digest: digest})
 	}
 	return rel, nil
 }

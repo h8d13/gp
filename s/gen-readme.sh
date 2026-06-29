@@ -30,6 +30,6 @@ EOF
 
 Keys resolve in order:
 
-command-line flags > real `env` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.
+command-line flags > real `ENV` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.
 EOF
 } > readme.md.tmp && mv readme.md.tmp readme.md

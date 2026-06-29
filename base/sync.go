@@ -124,12 +124,18 @@ func expandHome(p string) string {
 
 // upMain is the `gp up` entry point: it processes every source in sources.ini.
 // It exits non-zero if any source fails, but still attempts the rest so one bad
-// entry does not block the others.
-func upMain(p prefs) {
+// entry does not block the others. With checkOnly it stops after loadSources
+// has parsed and validated every section, touching no network and installing
+// nothing: a config lint for `gp up check`.
+func upMain(p prefs, checkOnly bool) {
 	srcs, err := loadSources(sourcesPath())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "up:", err)
 		os.Exit(1)
+	}
+	if checkOnly {
+		fmt.Printf("%s: %d sources OK\n", sourcesPath(), len(srcs))
+		return
 	}
 
 	lock := loadConfig(lockPath()) // [installed] NAME = tag

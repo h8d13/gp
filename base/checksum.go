@@ -16,10 +16,12 @@ import (
 	"strings"
 )
 
-// verifyChecksum hashes the file at fp and checks it against the source's
-// expected sha256: the pinned digest when set, else the one looked up by asset
-// name in the sha256-url checksums file. It is a no-op when the source pins
-// neither. A mismatch is a hard error.
+// verifyChecksum hashes the file at fp and checks it against the expected
+// sha256, resolved in precedence order: the source's pinned digest, else the
+// one looked up by asset name in its sha256-url checksums file, else the digest
+// the forge published for the asset (GitHub ships one, so its releases verify
+// with no config). It is a no-op when none of those exist. A mismatch is a hard
+// error.
 func verifyChecksum(client *http.Client, s source, a asset, fp string, p prefs, rp retryPolicy) error {
 	want := s.sha256
 	if want == "" && s.sumURL != "" {
@@ -28,6 +30,9 @@ func verifyChecksum(client *http.Client, s source, a asset, fp string, p prefs, 
 			return err
 		}
 		want = got
+	}
+	if want == "" {
+		want = a.Digest // forge-published per-asset digest, if any
 	}
 	if want == "" {
 		return nil
