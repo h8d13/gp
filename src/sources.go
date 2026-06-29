@@ -148,9 +148,9 @@ func fetchLatestRelease(client *http.Client, f forge, host, repo, ua string, rp 
 	}
 	req.Header.Set("Accept", f.accept)
 	if ua == "" {
-		ua = "gp"
+		ua = "gp" // forges reject a missing User-Agent
 	}
-	req.Header.Set("User-Agent", ua)
+	setUserAgent(req, ua)
 	f.auth(req)
 
 	resp, err := doRetry(client, req, rp)
@@ -235,9 +235,9 @@ func fetchIndex(client *http.Client, indexURL, ua string, rp retryPolicy) (relea
 		return release{}, err
 	}
 	if ua == "" {
-		ua = "gp"
+		ua = "gp" // some index hosts reject a missing User-Agent
 	}
-	req.Header.Set("User-Agent", ua)
+	setUserAgent(req, ua)
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		return release{}, err

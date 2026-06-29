@@ -115,6 +115,16 @@ func tlsConfig(p prefs) *tls.Config {
 	return nil
 }
 
+// setUserAgent sets req's User-Agent to ua, or leaves Go's default when ua is
+// empty. gp's own requests pass the configured UA (possibly empty); forge API
+// requests default ua to a non-empty value first, since forges reject a
+// missing User-Agent.
+func setUserAgent(req *http.Request, ua string) {
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+}
+
 // newClient builds the HTTP client for the probe and the single-stream path.
 // The QUIC path speaks HTTP/3 over a single QUIC connection (range requests
 // become multiplexed streams, so they share one congestion window and do not
@@ -255,8 +265,8 @@ func Main() {
 		p.ChunkBytes = chk
 	}
 	// An explicit -c pins the span exactly (the user chose a resume
-	// granularity); otherwise the split auto-sizes it from the body size and
-	// connection count below, once the probe reveals ContentLength.
+	// granularity); otherwise saveSplitAuto sizes it from the body size and
+	// connection count once the probe reveals ContentLength.
 	chunkSet := wasSet("c", "chunk")
 	if noProg {
 		p.Progress = false
@@ -293,9 +303,7 @@ func Main() {
 		fmt.Fprintln(os.Stderr, "request:", err)
 		os.Exit(1)
 	}
-	if p.UserAgent != "" {
-		req.Header.Set("User-Agent", p.UserAgent)
-	}
+	setUserAgent(req, p.UserAgent)
 	if p.Compress {
 		// Opt into transfer compression for the codings decodeBody handles.
 		// Forfeits ranges/resume/304 (the split case below also gates on this).
@@ -367,14 +375,7 @@ func Main() {
 	// stream, and a server compressing on its own drops Accept-Ranges anyway).
 	case !p.Compress && out != "" && p.splittable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
-		if !chunkSet {
-			p.ChunkBytes = int(splitSegment(resp.ContentLength, p.Parallel, int64(p.ChunkBytes)))
-		}
-		// The split needs its own per-connection windows, so it runs on a
-		// dedicated h1.1 client, not the h2 probe client above.
-		sc, closeSplit := newSplitClient(p)
-		defer closeSplit()
-		n, err = saveSplit(sc, resp, out, p, rp, prog)
+		n, err = saveSplitAuto(resp, out, p, chunkSet, rp, prog)
 	default:
 		// Single stream. Inflate any transfer compression on the fly; an
 		// identity body passes through, so the common path is unchanged. With

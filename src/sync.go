@@ -1,8 +1,10 @@
-// The `up` subcommand: keep tools from GitHub releases current. A sources.ini
-// next to config.ini lists [NAME] sections (repo/match/ext/dest); `gp up`
-// resolves each to the latest release, and downloads+installs only when the
-// release tag differs from what a lockfile records as installed. Tag equality
-// is the version check, so no per-tool version parsing is needed.
+// The `up` subcommand: keep locally-installed tools current. A sources.ini next
+// to config.ini lists [NAME] sections; each resolves to a downloadable file in
+// one of three ways (a forge release, a bare url, or a directory index; see the
+// source struct), and `gp up` installs it only when the upstream version
+// changed. The version is the release tag for a forge, else the HTTP validator
+// (ETag/Last-Modified). A lockfile records what is installed, so an unchanged
+// upstream is a no-op and no per-tool version parsing is needed.
 package src
 
 import (
@@ -244,9 +246,7 @@ func headValidator(client *http.Client, rawURL, ua string, rp retryPolicy) strin
 	if err != nil {
 		return ""
 	}
-	if ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
+	setUserAgent(req, ua)
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		return ""
@@ -350,9 +350,7 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	if err != nil {
 		return 0, err
 	}
-	if p.UserAgent != "" {
-		req.Header.Set("User-Agent", p.UserAgent)
-	}
+	setUserAgent(req, p.UserAgent)
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		return 0, err
@@ -369,7 +367,9 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	var n int64
 	if p.splittable(resp) {
 		resp.Body.Close() // drop the probe stream; range requests refetch
-		n, err = saveSplit(client, resp, out, p, rp, prog)
+		// up never pins the segment, so it always auto-sizes; a configured
+		// chunk still floors the span inside splitSegment.
+		n, err = saveSplitAuto(resp, out, p, false, rp, prog)
 	} else {
 		n, err = saveStream(out, resp.Body, prog)
 	}

@@ -60,7 +60,7 @@ func validatorOf(resp *http.Response) string {
 // (manifest.matches gates on chunk).
 func splitSegment(size int64, conns int, chunk int64) int64 {
 	if chunk <= 0 {
-		chunk = defaultChunkBytes // guard a misconfigured 0 from dividing the plan
+		chunk = defaultChunkBytes
 	}
 	if conns < 1 {
 		conns = 1
@@ -76,18 +76,32 @@ func splitSegment(size int64, conns int, chunk int64) int64 {
 	return seg
 }
 
-// saveSplit downloads resp's URL into out across p.Parallel range requests,
-// each spanning splitSegment(size, conns, ChunkBytes) bytes. When the remote
-// offers a validator it persists a resume manifest, reusing any chunks a
-// prior run already finished; otherwise
-// it behaves as a plain parallel fetch with no on-disk state. The probe body
-// is assumed already drained/closed by the caller (range requests refetch).
-// Returns bytes fetched THIS run (a resumed run reports only the gaps).
+// saveSplitAuto runs an optimal parallel split of resp into out, and is the one
+// way both download paths (a URL fetch and `up`) start a split. Unless the
+// segment is pinned it auto-sizes the per-request span from the body size and
+// connection count, and it always runs on a dedicated h1.1 client so each
+// connection gets its own congestion window: an h2/h3 client multiplexes every
+// range onto one window and the split would not aggregate (see newSplitClient).
+// The caller must have closed the probe body; range requests refetch.
+func saveSplitAuto(resp *http.Response, out string, p prefs, pinned bool, rp retryPolicy, prog *progress) (int64, error) {
+	if !pinned {
+		p.ChunkBytes = int(splitSegment(resp.ContentLength, p.Parallel, int64(p.ChunkBytes)))
+	}
+	sc, closeSplit := newSplitClient(p)
+	defer closeSplit()
+	return saveSplit(sc, resp, out, p, rp, prog)
+}
+
+// saveSplit downloads resp's URL into out across p.Parallel range requests, each
+// spanning p.ChunkBytes (already resolved by saveSplitAuto). When the remote
+// offers a validator it persists a resume manifest, reusing any chunks a prior
+// run already finished; otherwise it behaves as a plain parallel fetch with no
+// on-disk state. Returns bytes fetched THIS run (a resume reports only the gaps).
 func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp retryPolicy, prog *progress) (int64, error) {
 	size := resp.ContentLength
-	chunk := int64(p.ChunkBytes) // already resolved by the caller (see splitSegment)
+	chunk := int64(p.ChunkBytes)
 	if chunk <= 0 {
-		chunk = defaultChunkBytes // guard a misconfigured 0 from dividing the plan
+		chunk = defaultChunkBytes
 	}
 	validator := validatorOf(resp)
 	mp := manifestPath(out)
@@ -227,9 +241,7 @@ func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int6
 		return 0, err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-	if ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
+	setUserAgent(req, ua)
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
 		return 0, err
