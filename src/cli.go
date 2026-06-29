@@ -174,7 +174,7 @@ func Main() {
 	var out string
 	strVar(&out, "", "save response body to file", "o", "output")
 	var par int
-	intVar(&par, -1, "parallel connections; 1 disables (needs -o)", "p", "parallel")
+	intVar(&par, -1, "parallel connections; 1 disables", "p", "parallel")
 	var useQuic bool
 	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
 	var ret int

@@ -13,7 +13,7 @@ Usage: gp [flags] URL [FILE]
   -o, --output string
     	save response body to file
   -p, --parallel int
-    	parallel connections; 1 disables (needs -o)
+    	parallel connections; 1 disables
   -q, --quic
     	use HTTP/3 over QUIC
   -r, --retries int
