@@ -87,18 +87,26 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 		defer closeFn()
 	}
 
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return 0, err
-	}
 	tr := tar.NewReader(r)
+	// Don't touch the filesystem until the payload proves it's a tar: destDir
+	// is created lazily on the first valid entry, so a bogus body (an HTML
+	// error page, a wrong file) fails on the first header read without leaving
+	// an empty dir tree behind.
 	n := 0
+	made := false
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return n, nil
+			break
 		}
 		if err != nil {
 			return n, err
+		}
+		if !made {
+			if err := os.MkdirAll(destDir, 0o755); err != nil {
+				return n, err
+			}
+			made = true
 		}
 		target, err := safeJoin(destDir, hdr.Name)
 		if err != nil {
@@ -109,6 +117,11 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 		}
 		n++
 	}
+	// A valid but empty archive still yields the (empty) dest dir.
+	if !made {
+		return n, os.MkdirAll(destDir, 0o755)
+	}
+	return n, nil
 }
 
 // safeJoin resolves name under dir and rejects any result that escapes

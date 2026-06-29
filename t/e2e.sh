@@ -314,6 +314,22 @@ test_expect_success 'a pending resume suppresses the conditional request' '
 	test "$code" = 0 && contains "200 OK" "$out" && cmp ref.bin out.bin
 '
 
+# --- argument / failure hygiene --------------------------------------
+# A missing URL must error with usage, never fall back to a default fetch:
+# this is what catches "gp -x URL" (where -x swallows the URL as its dest).
+test_expect_success 'no URL given errors with usage, no fetch' '
+	gp -o out.bin; test "$code" != 0 &&
+	contains "no URL" "$out" && ! test -e out.bin
+'
+
+# A non-tar payload must fail extraction WITHOUT creating the dest tree, so a
+# botched run leaves nothing behind.
+test_expect_success 'extracting a non-tar body leaves no dest dir' '
+	export SERVE_SIZE=1024 && serve http &&   # 1KB of non-tar bytes
+	gp "$URL" -x dest; test "$code" != 0 &&
+	contains "extract" "$out" && ! test -e dest
+'
+
 # --- --compress: decode transfer-encoded responses ------------------
 # With -z gp advertises zstd/br/gzip and inflates the body itself (no auto-gzip
 # from Go's transport). The server serves the pre-compressed file verbatim

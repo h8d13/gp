@@ -270,10 +270,15 @@ func Main() {
 		return
 	}
 
-	url := "example.com"
-	if len(posArgs) > 0 {
-		url = posArgs[0]
+	// No URL: a missing positional almost always means a flag swallowed it
+	// (e.g. `gp -x URL`, where -x takes the extract dir as its value), so fail
+	// loudly with usage rather than silently fetching some default.
+	if len(posArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "gp: no URL given")
+		flag.Usage()
+		os.Exit(2)
 	}
+	url := posArgs[0]
 	url = urlScheme(url, p.AlwaysEncrypt)
 	if p.Quic && strings.HasPrefix(url, "http://") {
 		url = "https://" + strings.TrimPrefix(url, "http://")

@@ -1,6 +1,10 @@
 # gp
 
-`get-packets` is a small `go` CLI that fetches over HTTP/1, HTTP/2, and HTTP/3.
+`get-packets` is a `go` CLI that fetches over HTTP/1, HTTP/2, and HTTP/3.
+
+> It also doubles as a **sources and extract** manager. 
+
+See [config](./config.ini) and [sources](./sources.ini) for examples.
 
 ---
 <!-- gp-help:begin (generated; edit flags or gen-readme.sh, not below) -->
