@@ -128,9 +128,12 @@ test_expect_success '-o creates nested dirs and saves the body' '
 	test "$code" = 0 && test "$(cat nested/dir/body.txt)" = hi
 '
 
-test_expect_success 'bare URL saves to a derived filename (no -o)' '
-	serve http && gp "$URL/pkg/thing.bin" &&
-	test "$code" = 0 && test "$(cat thing.bin)" = hi
+# No -o: the body goes to stdout (byte-clean, pipeable) and the summary to
+# stderr, so a redirect captures only the payload and nothing is saved.
+test_expect_success 'no -o streams the body to stdout, summary to stderr' '
+	serve http && "$GP" "$URL/pkg/thing.bin" >body 2>err &&
+	test "$(cat body)" = hi && contains "200 OK" "$(cat err)" &&
+	! test -e thing.bin
 '
 
 test_expect_success '-o works after the URL, not just before it' '
@@ -247,11 +250,6 @@ test_expect_success TAR '-x unpacks a downloaded tar.gz' '
 	test "$(cat dest/file.txt)" = hello && test "$(cat dest/sub/n.txt)" = deep
 '
 
-test_expect_success 'a second positional arg saves to that file (implies -o)' '
-	serve http && gp "$URL" saved.txt &&
-	test "$code" = 0 && test "$(cat saved.txt)" = hi
-'
-
 # A non-canonical dest ("./dest") must clean to the same root as the
 # archive entries, or the traversal guard wrongly rejects every entry.
 test_expect_success TAR '-x accepts a non-canonical dest path' '
@@ -266,6 +264,29 @@ test_expect_success TAR '-x without -o leaves no archive behind' '
 	export SERVE_FILE="$PWD/payload.tgz" && serve http &&
 	gp "$URL" -x dest && test "$code" = 0 &&
 	test "$(cat dest/a.txt)" = hi && ! ls ./*.tar* >/dev/null 2>&1
+'
+
+# Combination: -x WITH -o extracts AND keeps the archive at the -o path
+# (the inverse of the temp-file case above).
+test_expect_success TAR '-x with -o extracts and keeps the archive' '
+	mkdir src && echo hello >src/file.txt && tar czf payload.tgz -C src . &&
+	export SERVE_FILE="$PWD/payload.tgz" && serve http &&
+	gp "$URL" -o kept.tgz -x dest && test "$code" = 0 &&
+	test "$(cat dest/file.txt)" = hello && test -s kept.tgz
+'
+
+# Combination: parallel split + -x. A plain (uncompressed) tar keeps the body
+# large enough to span several chunks, so the split path actually engages;
+# extractTarGz auto-detects tar vs tar.gz, so the reassembled archive unpacks.
+test_expect_success TAR 'parallel split then -x extracts the reassembled archive' '
+	mkdir src && head -c 20000 /dev/zero | tr "\0" a >src/big.txt &&
+	tar cf payload.tar -C src . &&
+	export SERVE_FILE="$PWD/payload.tar" && serve http &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=4096 &&
+	gp "$URL" -o arc.tar -x dest && test "$code" = 0 &&
+	test "$(wc -c <dest/big.txt | tr -d " ")" = 20000 &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" -ge 4
 '
 
 test_expect_success TAR '-x stages the temp archive under $TMPDIR and cleans it' '

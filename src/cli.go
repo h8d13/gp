@@ -4,11 +4,10 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -67,8 +66,7 @@ func wasSet(names ...string) bool {
 func usage() {
 	out := flag.CommandLine.Output()
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(out, "Usage: %s [flags] URL [FILE]\n", name)
-	fmt.Fprintf(out, "  FILE, if given, is where to save (default: the URL's basename)\n")
+	fmt.Fprintf(out, "Usage: %s [flags] URL\n", name)
 	for _, g := range flagGroups {
 		var spell []string
 		for _, n := range g.names {
@@ -141,17 +139,6 @@ func parseArgs() []string {
 	}
 }
 
-// outputName derives a save filename from the URL's last path segment,
-// falling back to index.html when the URL carries no usable name.
-func outputName(rawURL string) string {
-	if u, err := url.Parse(rawURL); err == nil {
-		if base := path.Base(u.Path); base != "" && base != "." && base != "/" {
-			return base
-		}
-	}
-	return "index.html"
-}
-
 func urlScheme(url string, encrypt bool) string {
 	if strings.Contains(url, "://") {
 		return url
@@ -172,7 +159,7 @@ func Main() {
 	}
 
 	var out string
-	strVar(&out, "", "save response body to file", "o", "output")
+	strVar(&out, "", "save the response body to this path (otherwise stdout)", "o", "output")
 	var par int
 	intVar(&par, -1, "parallel connections; 1 disables", "p", "parallel")
 	var useQuic bool
@@ -182,7 +169,7 @@ func Main() {
 	var chk int
 	intVar(&chk, -1, "split/resume chunk size in bytes", "c", "chunk")
 	var noProg bool
-	boolVar(&noProg, false, "disable the live download progress line", "no-progress")
+	boolVar(&noProg, false, "disable the live download progress line", "n", "no-progress")
 	var extract string
 	strVar(&extract, "", "unpack the downloaded tar/tar.gz into this dir", "x", "extract")
 	flag.Usage = usage
@@ -208,11 +195,6 @@ func Main() {
 	url := "example.com"
 	if len(posArgs) > 0 {
 		url = posArgs[0]
-	}
-	// A second positional is where to save: "gp URL FILE" implies -o FILE.
-	// An explicit -o wins.
-	if out == "" && len(posArgs) > 1 {
-		out = posArgs[1]
 	}
 	url = urlScheme(url, p.AlwaysEncrypt)
 	if p.Quic && strings.HasPrefix(url, "http://") {
@@ -241,30 +223,29 @@ func Main() {
 	}
 	defer resp.Body.Close()
 
-	// Resolve where bytes land; there is always an output file now.
-	// Precedence: -o / second positional (set above) > a temp file when
-	// extracting only, deleted after > the URL's basename.
-	if out == "" {
-		if extract != "" {
-			// Stage under os.TempDir(), which honors $TMPDIR ($TMPDIR else
-			// /tmp on Unix) so the caller can place the transient archive on
-			// a chosen filesystem (e.g. away from a small tmpfs).
-			tf, err := os.CreateTemp("", "gp-archive-*")
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "extract:", err)
-				os.Exit(1)
-			}
-			out = tf.Name()
-			tf.Close()
-			defer os.Remove(out) // user asked for files, not the tarball
-		} else {
-			out = outputName(url)
+	// Saving is explicit: only -o names an output file. With -x but no -o we
+	// still need the bytes on disk, so stage a temp archive (removed after
+	// extraction). With neither, the body is fetched and discarded -- the
+	// status line still reports protocol and size.
+	explicitOut := out != ""
+	if out == "" && extract != "" {
+		// Stage under os.TempDir(), which honors $TMPDIR ($TMPDIR else
+		// /tmp on Unix) so the caller can place the transient archive on
+		// a chosen filesystem (e.g. away from a small tmpfs).
+		tf, err := os.CreateTemp("", "gp-archive-*")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "extract:", err)
+			os.Exit(1)
 		}
+		out = tf.Name()
+		tf.Close()
+		defer os.Remove(out) // user asked for files, not the tarball
 	}
-
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "save:", err)
-		os.Exit(1)
+	if out != "" {
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, "save:", err)
+			os.Exit(1)
+		}
 	}
 
 	var n int64
@@ -272,13 +253,19 @@ func Main() {
 	// then reset()s to [XT] for extraction, reusing the same line.
 	prog := newProgress(resp.ContentLength, "DL", p.Progress)
 	prog.run()
+	switch {
 	// Split only when it can pay off and offset-writes are possible; that
 	// path also owns the output file and handles resume.
-	if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
+	case out != "" && p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
 		n, err = saveSplit(client, resp, out, p, rp, prog)
-	} else {
+	case out != "":
 		n, err = saveStream(out, resp.Body, prog)
+	default:
+		// No -o: stream the body to stdout so a bare fetch is pipeable
+		// (gp URL | tar xz). All diagnostics go to stderr so stdout stays
+		// byte-clean for a redirect or pipe.
+		n, err = io.Copy(progWriter{os.Stdout, prog}, resp.Body)
 	}
 	if err != nil {
 		prog.finish()
@@ -301,8 +288,13 @@ func Main() {
 	}
 	prog.finish()
 
-	fmt.Printf("%s %s proto=%s bytes=%d in %v\n", url, resp.Status, resp.Proto, n, elapsed)
+	dest := ""
+	if explicitOut {
+		dest = " saved=" + out
+	}
+	// Summary on stderr: stdout is reserved for the body (no-o case).
+	fmt.Fprintf(os.Stderr, "%s %s proto=%s bytes=%d in %v%s\n", url, resp.Status, resp.Proto, n, elapsed, dest)
 	if extract != "" {
-		fmt.Printf("extracted %d entries to %s\n", cnt, extract)
+		fmt.Fprintf(os.Stderr, "extracted %d entries to %s\n", cnt, extract)
 	}
 }

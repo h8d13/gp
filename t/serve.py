@@ -53,6 +53,9 @@ elif SIZE:
     BODY = pattern(SIZE)
 else:
     BODY = b"hi"
+# Advertise Accept-Ranges for any sized body (a pattern or a served file), so
+# gp's split path can engage on a real archive, not just the synthetic stream.
+RANGES = SIZE > 0 or bool(os.environ.get("SERVE_FILE"))
 lock = threading.Lock()
 barrier = threading.Barrier(EXPECT) if EXPECT > 1 else None
 cur = mx = 0
@@ -120,7 +123,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self.wfile.write(BODY[lo : hi + 1])
             return
         self.send_response(200)
-        if SIZE:
+        if RANGES:
             self.send_header("Accept-Ranges", "bytes")
         if ETAG:
             self.send_header("ETag", ETAG)

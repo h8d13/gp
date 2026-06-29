@@ -8,10 +8,9 @@
 ## Usage
 
 ```
-Usage: gp [flags] URL [FILE]
-  FILE, if given, is where to save (default: the URL's basename)
+Usage: gp [flags] URL
   -o, --output string
-    	save response body to file
+    	save the response body to this path (otherwise stdout)
   -p, --parallel int
     	parallel connections; 1 disables
   -q, --quic
@@ -20,7 +19,7 @@ Usage: gp [flags] URL [FILE]
     	retries on 429/503; 0 disables
   -c, --chunk int
     	split/resume chunk size in bytes
-  --no-progress
+  -n, --no-progress
     	disable the live download progress line
   -x, --extract string
     	unpack the downloaded tar/tar.gz into this dir
