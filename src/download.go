@@ -2,7 +2,7 @@
 // helps when the bottleneck is per-connection (CDN throttle, high-BDP
 // path); for small bodies the extra handshakes lose, so callers gate on
 // size via prefs.ParallelMin before reaching here.
-package main
+package src
 
 import (
 	"fmt"
@@ -38,7 +38,7 @@ func validatorOf(resp *http.Response) string {
 // it behaves as a plain parallel fetch with no on-disk state. The probe body
 // is assumed already drained/closed by the caller (range requests refetch).
 // Returns bytes fetched THIS run (a resumed run reports only the gaps).
-func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp retryPolicy) (int64, error) {
+func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp retryPolicy, prog *progress) (int64, error) {
 	size := resp.ContentLength
 	chunk := int64(p.ChunkBytes)
 	if chunk <= 0 {
@@ -64,6 +64,12 @@ func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp
 	}
 	defer f.Close()
 
+	// A resumed run only fetches the gaps, so seed the bar with what already
+	// landed; the total stays the full size set by the caller.
+	if resume {
+		prog.add(int64(len(m.Done)-m.remaining()) * m.Chunk)
+	}
+
 	// Persist progress only when a validator lets a later run trust it.
 	save := ""
 	if validator != "" {
@@ -73,7 +79,7 @@ func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp
 		fmt.Fprintf(os.Stderr, "resume: %d/%d chunks left\n", m.remaining(), len(m.Done))
 	}
 
-	n, err := download(client, resp.Request.URL.String(), p.UserAgent, f, m, save, p.Parallel, rp)
+	n, err := download(client, resp.Request.URL.String(), p.UserAgent, f, m, save, p.Parallel, rp, prog)
 	if err != nil {
 		return n, err // keep the manifest so the next run continues
 	}
@@ -85,7 +91,7 @@ func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp
 // one chunk of m.Chunk bytes at a time, each written at its offset. Chunks
 // m already marks done are skipped; when save is non-empty the manifest is
 // flushed after every completed chunk. Returns bytes fetched this run.
-func download(client *http.Client, url, ua string, f *os.File, m manifest, save string, conns int, rp retryPolicy) (int64, error) {
+func download(client *http.Client, url, ua string, f *os.File, m manifest, save string, conns int, rp retryPolicy, prog *progress) (int64, error) {
 	var pending []int
 	for i, done := range m.Done {
 		if !done {
@@ -125,7 +131,7 @@ func download(client *http.Client, url, ua string, f *os.File, m manifest, save 
 			if end >= m.Size {
 				end = m.Size - 1
 			}
-			n, err := fetchRange(client, url, ua, f, start, end, rp)
+			n, err := fetchRange(client, url, ua, f, start, end, rp, prog)
 			atomic.AddInt64(&total, n)
 
 			mu.Lock()
@@ -159,18 +165,18 @@ func download(client *http.Client, url, ua string, f *os.File, m manifest, save 
 // saveStream copies an already-open response body straight to out,
 // truncating any existing file. Used for the small or non-rangeable case
 // where splitting and resume don't apply.
-func saveStream(out string, body io.Reader) (int64, error) {
+func saveStream(out string, body io.Reader, prog *progress) (int64, error) {
 	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
-	return io.Copy(f, body)
+	return io.Copy(progWriter{f, prog}, body)
 }
 
 // fetchRange GETs bytes [start,end] of url and writes them at offset start
 // in f. Concurrent calls at disjoint offsets are safe: WriteAt is pwrite.
-func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, rp retryPolicy) (int64, error) {
+func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int64, rp retryPolicy, prog *progress) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -187,5 +193,5 @@ func fetchRange(client *http.Client, url, ua string, f *os.File, start, end int6
 	if resp.StatusCode != http.StatusPartialContent {
 		return 0, fmt.Errorf("range %d-%d: want 206, got %s", start, end, resp.Status)
 	}
-	return io.Copy(io.NewOffsetWriter(f, start), resp.Body)
+	return io.Copy(progWriter{io.NewOffsetWriter(f, start), prog}, resp.Body)
 }

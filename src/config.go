@@ -1,6 +1,6 @@
 // Config and env override logic. Every ini key has an env var
 // equivalent (allow-insecure -> ALLOW_INSECURE); env wins.
-package main
+package src
 
 import (
 	"bufio"
@@ -32,6 +32,7 @@ type prefs struct {
 	AllowInsecure bool   // skip TLS cert verification (default false)
 	AlwaysEncrypt bool   // scheme-less URLs get https:// (default true)
 	UserAgent     string // User-Agent header; "" leaves Go's default
+	Progress      bool   // show the live download progress line (default true)
 	Parallel      int    // range-download connections; 1 (default) disables
 	ParallelMin   int    // min body size in bytes to split (default 8 MiB)
 	ChunkBytes    int    // resume/split chunk size in bytes (default 4 MiB)
@@ -50,6 +51,7 @@ func loadPrefs(iniPath, envPath string) prefs {
 		AllowInsecure: cfg.boolOr("pref", "allow-insecure", false),
 		AlwaysEncrypt: cfg.boolOr("pref", "always-encrypt", true),
 		UserAgent:     cfg.get("user", "user-agent"),
+		Progress:      cfg.boolOr("pref", "progress", true),
 		Parallel:      cfg.intOr("pref", "parallel", 1),
 		ParallelMin:   cfg.intOr("pref", "parallel-min", 8<<20),
 		ChunkBytes:    cfg.intOr("pref", "chunk-bytes", 4<<20),

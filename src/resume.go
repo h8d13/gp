@@ -3,7 +3,7 @@
 // refetches only the gaps instead of restarting. The manifest is keyed on
 // (size, validator, chunk): if the remote file changed, none of the stale
 // local bytes are reused.
-package main
+package src
 
 import (
 	"encoding/json"
