@@ -32,15 +32,45 @@ func validatorOf(resp *http.Response) string {
 	return resp.Header.Get("Last-Modified")
 }
 
+// splitSegment picks the default per-request byte span for a parallel fetch
+// (used only when the user did not pin one with -c). The throughput win of a
+// split comes from each connection streaming ONE continuous range: a span much
+// smaller than size/conns makes every worker re-issue range requests
+// mid-download, and each new request stalls a full RTT (and restarts TCP
+// slow-start on the idled socket) before bytes flow. So target size/conns, but
+// never go below ChunkBytes (the configured floor) and cap the span so a
+// multi-GB file still checkpoints often enough for resume to be worthwhile.
+// Because the span depends on conns, a resumed run must reuse the same -p to
+// match the manifest; a different -p re-derives the span and restarts
+// (manifest.matches gates on chunk).
+func splitSegment(size int64, conns int, chunk int64) int64 {
+	if chunk <= 0 {
+		chunk = 4 << 20 // guard a misconfigured 0 from dividing the plan
+	}
+	if conns < 1 {
+		conns = 1
+	}
+	const cap = 64 << 20
+	seg := (size + int64(conns) - 1) / int64(conns)
+	if seg < chunk {
+		seg = chunk
+	}
+	if seg > cap {
+		seg = cap
+	}
+	return seg
+}
+
 // saveSplit downloads resp's URL into out across p.Parallel range requests,
-// chunked at p.ChunkBytes. When the remote offers a validator it persists a
-// resume manifest, reusing any chunks a prior run already finished; otherwise
+// each spanning splitSegment(size, conns, ChunkBytes) bytes. When the remote
+// offers a validator it persists a resume manifest, reusing any chunks a
+// prior run already finished; otherwise
 // it behaves as a plain parallel fetch with no on-disk state. The probe body
 // is assumed already drained/closed by the caller (range requests refetch).
 // Returns bytes fetched THIS run (a resumed run reports only the gaps).
 func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp retryPolicy, prog *progress) (int64, error) {
 	size := resp.ContentLength
-	chunk := int64(p.ChunkBytes)
+	chunk := int64(p.ChunkBytes) // already resolved by the caller (see splitSegment)
 	if chunk <= 0 {
 		chunk = 4 << 20 // guard a misconfigured 0 from dividing the plan
 	}

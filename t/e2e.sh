@@ -209,6 +209,33 @@ test_expect_success '-c chunk size splits into ceil(size/chunk) ranges' '
 	test ! -e out.bin.gp-part   # manifest dropped once complete
 '
 
+# Without an explicit -c, the split auto-sizes each span to size/conns so every
+# connection streams one continuous range (no mid-transfer RTT stalls). Here
+# chunk-bytes is only a floor (16K < 64K = size/conns), so it must NOT force 16
+# tiny ranges the way an explicit -c would.
+test_expect_success 'split without -c auto-sizes to one span per connection' '
+	export SERVE_SIZE=$((256 * 1024)) && serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=$((16 * 1024)) &&
+	gp -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" = 4
+'
+
+# The flag pins the span exactly: same body and conns as above, but -c 16K now
+# overrides the auto-size and yields 256K/16K = 16 ranges (finer resume, the
+# user's explicit choice). Proves the flag beats the env-set floor.
+test_expect_success 'explicit -c overrides auto-size and pins the span' '
+	export SERVE_SIZE=$((256 * 1024)) && serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=$((16 * 1024)) &&
+	gp -c $((16 * 1024)) -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" = 16
+'
+
 # A killed transfer leaves a manifest marking the chunks already on disk;
 # the next run must refetch ONLY the gaps, trusting the bytes it kept.
 test_expect_success 'resume refetches only the missing chunks' '

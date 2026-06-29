@@ -115,11 +115,13 @@ func tlsConfig(p prefs) *tls.Config {
 	return nil
 }
 
-// newClient builds the HTTP client for p. The QUIC path speaks HTTP/3 over a
-// single QUIC connection (range requests become multiplexed streams, so they
-// share one congestion window and do not aggregate past a per-connection
-// cap); the default path is stdlib h1/h2. The returned closer releases the
-// QUIC transport and is a no-op otherwise.
+// newClient builds the HTTP client for the probe and the single-stream path.
+// The QUIC path speaks HTTP/3 over a single QUIC connection (range requests
+// become multiplexed streams, so they share one congestion window and do not
+// aggregate past a per-connection cap); the default path is stdlib h1/h2,
+// where h2 wins for a lone stream (one warmed window, cheaper than h1's extra
+// per-request framing). A parallel split does NOT reuse this client: see
+// newSplitClient for why h2 actively hurts there.
 func newClient(p prefs) (*http.Client, func() error) {
 	if p.Quic {
 		tr := &http3.Transport{
@@ -138,6 +140,40 @@ func newClient(p prefs) (*http.Client, func() error) {
 		TLSClientConfig:       tlsConfig(p),
 	}
 	return &http.Client{Transport: tr}, func() error { return nil }
+}
+
+// newSplitClient builds the client for a parallel range split. The point of a
+// split is N congestion windows summing past a per-connection cap, but Go's h2
+// transport multiplexes every range request as a stream over ONE TCP
+// connection: N streams, one window, no aggregation (the same trap the QUIC
+// path documents). So this client forces HTTP/1.1 (empty TLSNextProto disables
+// h2) and sizes the connection pool to conns, giving each worker its own
+// socket and its own window. MaxIdleConnsPerHost matters as much as the cap:
+// the stdlib default is 2, which would tear down and re-dial all but two
+// workers' connections between chunks. Falls back to newClient for QUIC, where
+// the single-window tradeoff is the user's explicit choice.
+func newSplitClient(p prefs) (*http.Client, func() error) {
+	if p.Quic {
+		return newClient(p)
+	}
+	conns := p.Parallel
+	if conns < 1 {
+		conns = 1
+	}
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 30 * time.Second,
+		TLSClientConfig:       tlsConfig(p),
+		// non-nil empty map: opt out of the automatic h2 upgrade.
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxConnsPerHost:     conns,
+		MaxIdleConns:        conns,
+		MaxIdleConnsPerHost: conns,
+	}
+	return &http.Client{Transport: tr}, func() error {
+		tr.CloseIdleConnections()
+		return nil
+	}
 }
 
 // parseArgs parses flags that may appear before or after the URL. Go's
@@ -199,6 +235,10 @@ func Main() {
 	if chk > 0 {
 		p.ChunkBytes = chk
 	}
+	// An explicit -c pins the span exactly (the user chose a resume
+	// granularity); otherwise the split auto-sizes it from the body size and
+	// connection count below, once the probe reveals ContentLength.
+	chunkSet := wasSet("c", "chunk")
 	if noProg {
 		p.Progress = false
 	}
@@ -277,7 +317,14 @@ func Main() {
 	// path also owns the output file and handles resume.
 	case out != "" && p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
-		n, err = saveSplit(client, resp, out, p, rp, prog)
+		if !chunkSet {
+			p.ChunkBytes = int(splitSegment(resp.ContentLength, p.Parallel, int64(p.ChunkBytes)))
+		}
+		// The split needs its own per-connection windows, so it runs on a
+		// dedicated h1.1 client, not the h2 probe client above.
+		sc, closeSplit := newSplitClient(p)
+		defer closeSplit()
+		n, err = saveSplit(sc, resp, out, p, rp, prog)
 	case out != "":
 		n, err = saveStream(out, resp.Body, prog)
 	default:
