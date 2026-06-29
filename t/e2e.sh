@@ -339,6 +339,27 @@ dest = $PWD/inst
 	grep -q "TOOL = v1.0.0" "$LOCK"
 '
 
+# Flags after the verb reach up, and up now honors parallel/chunk: a large,
+# rangeable asset fetched with -p/-c splits into several range requests
+# (PARALLEL_MIN has no flag, so it comes from the env).
+test_expect_success TAR 'up honors -p/-c and splits the asset download' '
+	mkdir srcd && head -c 20000 /dev/zero | tr "\0" a >srcd/big.txt &&
+	tar cf app.tar -C srcd . &&
+	export SERVE_FILE="$PWD/app.tar" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar
+dest = $PWD/inst
+" &&
+	rm -f ranges && export PARALLEL_MIN=1 &&
+	gp up -p 4 -c 4096 && test "$code" = 0 &&
+	test "$(wc -c <inst/big.txt | tr -d " ")" = 20000 &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" -ge 4
+'
+
 test_expect_success TAR 'up is a no-op when the lock tag matches the release' '
 	mkdir srcd && echo hi >srcd/f.txt && tar czf app.tgz -C srcd . &&
 	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&

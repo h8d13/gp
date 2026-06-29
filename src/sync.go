@@ -80,17 +80,14 @@ func expandHome(p string) string {
 	return p
 }
 
-// upMain is the `gp up [NAME...]` entry point. With no names it processes every
-// source; otherwise only the named ones. It exits non-zero if any source fails,
-// but still attempts the rest so one bad entry does not block the others.
-func upMain(names []string, p prefs) {
+// upMain is the `gp up` entry point: it processes every source in sources.ini.
+// It exits non-zero if any source fails, but still attempts the rest so one bad
+// entry does not block the others.
+func upMain(p prefs) {
 	srcs, err := loadSources(sourcesPath())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "up:", err)
 		os.Exit(1)
-	}
-	if len(names) > 0 {
-		srcs = selectSources(srcs, names)
 	}
 
 	lock := loadConfig(lockPath()) // [installed] NAME = tag
@@ -122,24 +119,6 @@ func upMain(names []string, p prefs) {
 	if failed {
 		os.Exit(1)
 	}
-}
-
-// selectSources filters srcs to the requested names, warning about any name
-// with no matching section.
-func selectSources(srcs []source, names []string) []source {
-	byName := map[string]source{}
-	for _, s := range srcs {
-		byName[s.name] = s
-	}
-	var out []source
-	for _, n := range names {
-		if s, ok := byName[n]; ok {
-			out = append(out, s)
-		} else {
-			fmt.Fprintf(os.Stderr, "up: no source named %q\n", n)
-		}
-	}
-	return out
 }
 
 // syncOne resolves s to its latest release and installs it when the tag differs
@@ -208,8 +187,9 @@ func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) er
 }
 
 // fetchToFile streams url to out with a progress bar, following redirects (the
-// CDN hop browser_download_url makes). It does not split: the redirected target
-// is not assumed rangeable, and release assets fit a single stream fine.
+// CDN hop browser_download_url makes). It splits into a parallel/resumable
+// download when prefs enable it and the (redirected) target advertises byte
+// ranges; otherwise it falls back to a single stream.
 func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, label string) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -231,7 +211,13 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	}
 	prog := newProgress(resp.ContentLength, label, p.Progress)
 	prog.run()
-	n, err := saveStream(out, resp.Body, prog)
+	var n int64
+	if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
+		resp.Body.Close() // drop the probe stream; range requests refetch
+		n, err = saveSplit(client, resp, out, p, rp, prog)
+	} else {
+		n, err = saveStream(out, resp.Body, prog)
+	}
 	prog.finish()
 	return n, err
 }

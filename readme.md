@@ -9,8 +9,13 @@
 
 ```
 Usage: gp [flags] URL
-  -o, --output string
-    	save the response body to this path (otherwise stdout)
+       gp up [flags]
+
+Commands:
+  gp up
+    	install/update all tools from sources.ini
+
+Global options (all commands):
   -p, --parallel int
     	parallel connections; 1 disables
   -q, --quic
@@ -21,12 +26,12 @@ Usage: gp [flags] URL
     	split/resume chunk size in bytes
   -n, --no-progress
     	disable the live download progress line
+
+Download options (URL form only):
+  -o, --output string
+    	save the response body to this path (otherwise stdout)
   -x, --extract string
     	unpack the downloaded tar/tar.gz into this dir
-
-Commands:
-  gp up [NAME...]
-    	install/update tools from sources.ini
 ```
 
 ## Configuration

@@ -19,34 +19,36 @@ import (
 // flagGroup records one option's aliases so usage prints it once as
 // "-o, --output" instead of a line per name.
 type flagGroup struct {
-	names []string
-	typ   string
-	usage string
+	names  []string
+	typ    string
+	usage  string
+	global bool // true: applies to every command (incl. `up`); false: no-verb only
 }
 
 var flagGroups []flagGroup
 
 // strVar/intVar bind every name to the same target: one definition, many
-// spellings (-o and --output stay in sync).
-func strVar(p *string, def, usage string, names ...string) {
+// spellings (-o and --output stay in sync). global tags which usage section
+// the flag prints under (see usage()).
+func strVar(p *string, global bool, def, usage string, names ...string) {
 	for _, n := range names {
 		flag.StringVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "string", usage})
+	flagGroups = append(flagGroups, flagGroup{names, "string", usage, global})
 }
 
-func intVar(p *int, def int, usage string, names ...string) {
+func intVar(p *int, global bool, def int, usage string, names ...string) {
 	for _, n := range names {
 		flag.IntVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "int", usage})
+	flagGroups = append(flagGroups, flagGroup{names, "int", usage, global})
 }
 
-func boolVar(p *bool, def bool, usage string, names ...string) {
+func boolVar(p *bool, global bool, def bool, usage string, names ...string) {
 	for _, n := range names {
 		flag.BoolVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "", usage})
+	flagGroups = append(flagGroups, flagGroup{names, "", usage, global})
 }
 
 // wasSet reports whether any of names was passed on the command line, so a
@@ -67,7 +69,27 @@ func usage() {
 	out := flag.CommandLine.Output()
 	name := filepath.Base(os.Args[0])
 	fmt.Fprintf(out, "Usage: %s [flags] URL\n", name)
+	fmt.Fprintf(out, "       %s up [flags]\n", name)
+
+	// Verbs first, then flags split by scope: global flags work for every
+	// command (the URL form and `up`); download flags only for the URL form.
+	fmt.Fprintf(out, "\nCommands:\n")
+	fmt.Fprintf(out, "  %s up\n    \tinstall/update all tools from sources.ini\n", name)
+
+	fmt.Fprintf(out, "\nGlobal options (all commands):\n")
+	printFlags(out, true)
+
+	fmt.Fprintf(out, "\nDownload options (URL form only):\n")
+	printFlags(out, false)
+}
+
+// printFlags renders the flag groups whose scope matches global, one line per
+// option with its aliases collapsed ("-o, --output").
+func printFlags(out io.Writer, global bool) {
 	for _, g := range flagGroups {
+		if g.global != global {
+			continue
+		}
 		var spell []string
 		for _, n := range g.names {
 			if len(n) == 1 {
@@ -82,10 +104,6 @@ func usage() {
 		}
 		fmt.Fprintf(out, "  %s\n    \t%s\n", line, g.usage)
 	}
-	// Subcommands get their own block so they don't read as flags of the
-	// default URL form above.
-	fmt.Fprintf(out, "\nCommands:\n")
-	fmt.Fprintf(out, "  %s up [NAME...]\n    \tinstall/update tools from sources.ini\n", name)
 }
 
 // tlsConfig is the single place TLS policy lives; nil means stdlib
@@ -151,27 +169,20 @@ func urlScheme(url string, encrypt bool) string {
 
 // Main is the CLI entry point, invoked by the root package's main().
 func Main() {
-	// The `up` subcommand is a separate verb from the URL fetcher: handle it
-	// before flag parsing so its args don't collide with the download flags.
-	if len(os.Args) > 1 && os.Args[1] == "up" {
-		upMain(os.Args[2:], loadPrefs(configPath(), ".env"))
-		return
-	}
-
 	var out string
-	strVar(&out, "", "save the response body to this path (otherwise stdout)", "o", "output")
+	strVar(&out, false, "", "save the response body to this path (otherwise stdout)", "o", "output")
 	var par int
-	intVar(&par, -1, "parallel connections; 1 disables", "p", "parallel")
+	intVar(&par, true, -1, "parallel connections; 1 disables", "p", "parallel")
 	var useQuic bool
-	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
+	boolVar(&useQuic, true, false, "use HTTP/3 over QUIC", "q", "quic")
 	var ret int
-	intVar(&ret, -1, "retries on 429/503; 0 disables", "r", "retries")
+	intVar(&ret, true, -1, "retries on 429/503; 0 disables", "r", "retries")
 	var chk int
-	intVar(&chk, -1, "split/resume chunk size in bytes", "c", "chunk")
+	intVar(&chk, true, -1, "split/resume chunk size in bytes", "c", "chunk")
 	var noProg bool
-	boolVar(&noProg, false, "disable the live download progress line", "n", "no-progress")
+	boolVar(&noProg, true, false, "disable the live download progress line", "n", "no-progress")
 	var extract string
-	strVar(&extract, "", "unpack the downloaded tar/tar.gz into this dir", "x", "extract")
+	strVar(&extract, false, "", "unpack the downloaded tar/tar.gz into this dir", "x", "extract")
 	flag.Usage = usage
 	posArgs := parseArgs()
 
@@ -190,6 +201,14 @@ func Main() {
 	}
 	if noProg {
 		p.Progress = false
+	}
+
+	// The `up` subcommand walks all of sources.ini using the prefs resolved
+	// above, so the download flags (-p, -q, -r, -c, -n) shape its fetches too.
+	// It takes no positional args; anything after `up` is ignored.
+	if len(posArgs) > 0 && posArgs[0] == "up" {
+		upMain(p)
+		return
 	}
 
 	url := "example.com"
