@@ -2,7 +2,7 @@
 
 `get-packets` is a `go` CLI that fetches over HTTP/1, HTTP/2, and HTTP/3.
 
-> It also doubles as a **sources and extract** manager. 
+> Inspired by some of [curl](https://github.com/curl/curl) but also doubles as a **sources and extract** manager. 
 
 See [config](./config.ini) and [sources](./sources.ini) for examples.
 
