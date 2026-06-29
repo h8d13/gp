@@ -367,7 +367,7 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	prog := newProgress(resp.ContentLength, label, p.Progress)
 	prog.run()
 	var n int64
-	if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
+	if p.splittable(resp) {
 		resp.Body.Close() // drop the probe stream; range requests refetch
 		n, err = saveSplit(client, resp, out, p, rp, prog)
 	} else {

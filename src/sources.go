@@ -17,6 +17,11 @@ import (
 	"strings"
 )
 
+// maxAPIBytes caps how much of a forge API or directory-index response gp reads
+// into memory before parsing: ample for any real release JSON or listing, small
+// enough to bound a hostile or runaway body.
+const maxAPIBytes = 8 << 20
+
 // asset is one downloadable file attached to a release, normalized across
 // forges. URL may 302-redirect to a CDN, so the fetch path must follow
 // redirects (the stdlib client does). Size is 0 when the forge omits it
@@ -153,7 +158,7 @@ func fetchLatestRelease(client *http.Client, f forge, host, repo, ua string, rp 
 		return release{}, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes))
 	if resp.StatusCode != http.StatusOK {
 		// The body carries the forge's reason (rate limit, not found, ...).
 		return release{}, fmt.Errorf("%s: %s: %s", repo, resp.Status, strings.TrimSpace(string(body)))
@@ -238,7 +243,7 @@ func fetchIndex(client *http.Client, indexURL, ua string, rp retryPolicy) (relea
 		return release{}, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes))
 	if resp.StatusCode != http.StatusOK {
 		return release{}, fmt.Errorf("%s: %s", indexURL, resp.Status)
 	}

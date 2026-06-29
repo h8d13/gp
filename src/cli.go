@@ -303,18 +303,9 @@ func Main() {
 	}
 
 	// Replay a prior run's validator as a conditional request, so an unchanged
-	// file comes back 304 and skips the transfer. Only when -o names a file
-	// that is fully on disk (no pending .gp-part resume) and whose cached meta
-	// is for this same URL; --force opts out and always refetches.
-	if out != "" && !force {
-		if _, err := os.Stat(out); err == nil {
-			if _, e := os.Stat(manifestPath(out)); e != nil {
-				if m, ok := loadMeta(metaPath(out)); ok && m.URL == url {
-					m.applyConditional(req)
-				}
-			}
-		}
-	}
+	// file comes back 304 and skips the transfer (see applyCachedValidator for
+	// the exact preconditions; --force opts out and always refetches).
+	applyCachedValidator(req, out, url, force)
 
 	rp := p.retry()
 	start := time.Now()
@@ -374,7 +365,7 @@ func Main() {
 	// transfer: byte ranges would address the encoded stream, not the file, so
 	// the reassembled offsets would be meaningless (--compress forces one
 	// stream, and a server compressing on its own drops Accept-Ranges anyway).
-	case !p.Compress && out != "" && p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp):
+	case !p.Compress && out != "" && p.splittable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
 		if !chunkSet {
 			p.ChunkBytes = int(splitSegment(resp.ContentLength, p.Parallel, int64(p.ChunkBytes)))

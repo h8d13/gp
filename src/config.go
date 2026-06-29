@@ -55,7 +55,7 @@ func loadPrefs(iniPath, envPath string) prefs {
 		Progress:      cfg.boolOr("pref", "progress", true),
 		Parallel:      cfg.intOr("pref", "parallel", 1),
 		ParallelMin:   cfg.intOr("pref", "parallel-min", 8<<20),
-		ChunkBytes:    cfg.intOr("pref", "chunk-bytes", 4<<20),
+		ChunkBytes:    cfg.intOr("pref", "chunk-bytes", defaultChunkBytes),
 		Quic:          cfg.boolOr("pref", "quic", false),
 		Compress:      cfg.boolOr("pref", "compress", false),
 		Retries:       cfg.intOr("pref", "retries", 3),

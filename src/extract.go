@@ -136,8 +136,8 @@ func safeJoin(dir, name string) (string, error) {
 }
 
 // writeEntry materializes one tar entry. Directories and regular files
-// are created; symlinks are created only when their resolved target stays
-// inside destDir; other types (devices, fifos, hardlinks) are skipped.
+// are created; symlinks are created only when their target is relative and
+// resolves inside destDir; other types (devices, fifos, hardlinks) are skipped.
 func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 	switch hdr.Typeflag {
 	case tar.TypeDir:
@@ -154,6 +154,16 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 		_, err = io.Copy(f, tr)
 		return err
 	case tar.TypeSymlink:
+		// A symlink escapes destDir two ways: an absolute target, or a
+		// relative one that climbs out with "../". safeJoin catches the
+		// relative case, but it joins the linkname under destDir and so reads
+		// an absolute target as a safe-looking in-dir path while os.Symlink
+		// still stores the raw absolute target. So reject absolute targets
+		// outright, then range-check the relative resolution. Without this a
+		// later entry written through the link lands outside destDir.
+		if filepath.IsAbs(hdr.Linkname) {
+			return fmt.Errorf("unsafe absolute symlink target: %q -> %q", hdr.Name, hdr.Linkname)
+		}
 		if _, err := safeJoin(destDir, filepath.Join(filepath.Dir(hdr.Name), hdr.Linkname)); err != nil {
 			return err
 		}

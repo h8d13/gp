@@ -9,7 +9,6 @@
 package src
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 )
@@ -31,15 +30,8 @@ func metaPath(out string) string { return out + metaSuffix }
 // loadMeta reads a meta sidecar. ok is false when the file is absent or
 // unparsable: both mean "no cache", never a hard error.
 func loadMeta(path string) (meta, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return meta{}, false
-	}
 	var m meta
-	if err := json.Unmarshal(b, &m); err != nil {
-		return meta{}, false
-	}
-	return m, true
+	return m, readJSON(path, &m)
 }
 
 // metaFrom captures the conditional validators from a response, tagged with the
@@ -58,19 +50,9 @@ func metaFrom(url string, resp *http.Response) (meta, bool) {
 	return m, true
 }
 
-// save writes m atomically (temp + rename), matching the manifest sidecar so a
+// save writes m atomically beside the -o target (see writeJSONAtomic), so a
 // crash mid-write can't leave a torn cache record.
-func (m meta) save(path string) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+func (m meta) save(path string) error { return writeJSONAtomic(path, m) }
 
 // applyConditional sets the conditional headers on req from a saved meta. Both
 // are sent when known; per RFC 9110 the server prefers If-None-Match (the
@@ -81,5 +63,24 @@ func (m meta) applyConditional(req *http.Request) {
 	}
 	if m.LastMod != "" {
 		req.Header.Set("If-Modified-Since", m.LastMod)
+	}
+}
+
+// applyCachedValidator makes req conditional when out is already a complete,
+// current cache of url: the file exists, no resume is pending (.gp-part
+// absent), and the saved meta names this same url. A 304 then skips the
+// transfer. force, or any miss, leaves req unconditional for a full fetch.
+func applyCachedValidator(req *http.Request, out, url string, force bool) {
+	if out == "" || force {
+		return
+	}
+	if _, err := os.Stat(out); err != nil {
+		return
+	}
+	if _, err := os.Stat(manifestPath(out)); err == nil {
+		return // a resume is pending: not a complete cache
+	}
+	if m, ok := loadMeta(metaPath(out)); ok && m.URL == url {
+		m.applyConditional(req)
 	}
 }

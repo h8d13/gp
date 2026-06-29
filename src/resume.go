@@ -5,11 +5,6 @@
 // local bytes are reused.
 package src
 
-import (
-	"encoding/json"
-	"os"
-)
-
 const manifestSuffix = ".gp-part"
 
 // manifest is the on-disk resume state. Done[i] true means chunk i is fully
@@ -33,15 +28,8 @@ func newManifest(size, chunk int64, validator string) manifest {
 // loadManifest reads a manifest from path. ok is false when the file is
 // absent or unparsable: both mean "no resume state", not a hard error.
 func loadManifest(path string) (manifest, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return manifest{}, false
-	}
 	var m manifest
-	if err := json.Unmarshal(b, &m); err != nil {
-		return manifest{}, false
-	}
-	return m, true
+	return m, readJSON(path, &m)
 }
 
 // matches reports whether a saved manifest still describes the current
@@ -64,16 +52,6 @@ func (m manifest) remaining() int {
 	return n
 }
 
-// save writes m atomically (temp + rename in the same dir) so a crash
-// mid-write can never leave a torn manifest that misreports progress.
-func (m manifest) save(path string) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+// save writes m atomically beside the -o target (see writeJSONAtomic) so a
+// crash mid-write can never leave a torn manifest that misreports progress.
+func (m manifest) save(path string) error { return writeJSONAtomic(path, m) }

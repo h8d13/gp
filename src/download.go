@@ -22,6 +22,21 @@ func rangeable(resp *http.Response) bool {
 		strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes")
 }
 
+// defaultChunkBytes is the split/resume chunk used when none is configured (it
+// matches the config default) and as a guard when a misconfigured 0 would
+// otherwise divide the download plan.
+const defaultChunkBytes = 4 << 20
+
+// splittable reports whether resp should be fetched as a parallel range split
+// under p: more than one connection, a body at or past the split floor, and a
+// server that advertised byte ranges. Callers layer their own preconditions
+// (an output file, no transfer compression) on top.
+func (p prefs) splittable(resp *http.Response) bool {
+	return p.Parallel > 1 &&
+		resp.ContentLength >= int64(p.ParallelMin) &&
+		rangeable(resp)
+}
+
 // validatorOf returns the strongest cache validator resp offers: ETag, else
 // Last-Modified, else "". An empty validator means resume is unsafe (the
 // remote can't be proven unchanged), so the caller forgoes the manifest.
@@ -45,18 +60,18 @@ func validatorOf(resp *http.Response) string {
 // (manifest.matches gates on chunk).
 func splitSegment(size int64, conns int, chunk int64) int64 {
 	if chunk <= 0 {
-		chunk = 4 << 20 // guard a misconfigured 0 from dividing the plan
+		chunk = defaultChunkBytes // guard a misconfigured 0 from dividing the plan
 	}
 	if conns < 1 {
 		conns = 1
 	}
-	const cap = 64 << 20
+	const maxSeg = 64 << 20
 	seg := (size + int64(conns) - 1) / int64(conns)
 	if seg < chunk {
 		seg = chunk
 	}
-	if seg > cap {
-		seg = cap
+	if seg > maxSeg {
+		seg = maxSeg
 	}
 	return seg
 }
@@ -72,7 +87,7 @@ func saveSplit(client *http.Client, resp *http.Response, out string, p prefs, rp
 	size := resp.ContentLength
 	chunk := int64(p.ChunkBytes) // already resolved by the caller (see splitSegment)
 	if chunk <= 0 {
-		chunk = 4 << 20 // guard a misconfigured 0 from dividing the plan
+		chunk = defaultChunkBytes // guard a misconfigured 0 from dividing the plan
 	}
 	validator := validatorOf(resp)
 	mp := manifestPath(out)
