@@ -11,7 +11,7 @@ import (
 )
 
 // configPath resolves the ini location per the XDG Base Directory spec:
-// $XDG_CONFIG_HOME/gp/gpconfig.ini, else ~/.config/gp/gpconfig.ini.
+// $XDG_CONFIG_HOME/gp/config.ini, else ~/.config/gp/config.ini.
 // XDG_CONFIG_HOME is honored only when absolute (spec requirement);
 // a relative or unset value falls back to ~/.config.
 func configPath() string {
@@ -23,7 +23,7 @@ func configPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "gp", "gpconfig.ini")
+	return filepath.Join(dir, "gp", "config.ini")
 }
 
 // prefs is the typed view of [pref]: the single place where keys,

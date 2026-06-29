@@ -38,7 +38,7 @@ gp() { out=$("$GP" "$@" 2>&1); code=$?; }
 # fail unless $2 contains substring $1
 contains() { case "$2" in *"$1"*) return 0 ;; esac; echo "missing [$1] in: $2"; return 1; }
 # write gp config ($1) under a fresh XDG dir and point gp at it
-write_ini() { mkdir -p xdg/gp && printf '%s' "$1" >xdg/gp/gpconfig.ini && export XDG_CONFIG_HOME="$PWD/xdg"; }
+write_ini() { mkdir -p xdg/gp && printf '%s' "$1" >xdg/gp/config.ini && export XDG_CONFIG_HOME="$PWD/xdg"; }
 # write sources.ini ($1) under a fresh XDG dir; LOCK points at its sidecar lock
 write_sources() { mkdir -p xdg/gp && printf '%s' "$1" >xdg/gp/sources.ini && export XDG_CONFIG_HOME="$PWD/xdg" LOCK="$PWD/xdg/gp/sources.lock"; }
 

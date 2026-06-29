@@ -26,4 +26,4 @@ Usage: gp [flags] [url]   (url defaults to example.com)
 
 Keys resolve in order:
 
-command-line flags > real `env` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/gpconfig.ini` > fallback defaults.
+command-line flags > real `env` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.

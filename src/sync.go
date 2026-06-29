@@ -1,5 +1,5 @@
 // The `up` subcommand: keep tools from GitHub releases current. A sources.ini
-// next to gpconfig.ini lists [NAME] sections (repo/match/ext/dest); `gp up`
+// next to config.ini lists [NAME] sections (repo/match/ext/dest); `gp up`
 // resolves each to the latest release, and downloads+installs only when the
 // release tag differs from what a lockfile records as installed. Tag equality
 // is the version check, so no per-tool version parsing is needed.
@@ -25,7 +25,7 @@ type source struct {
 	dest  string   // where to install (extract dir, or file dir for non-tar)
 }
 
-// sourcesPath and lockPath live beside gpconfig.ini so all gp state is in one
+// sourcesPath and lockPath live beside config.ini so all gp state is in one
 // place under $XDG_CONFIG_HOME/gp.
 func sourcesPath() string { return filepath.Join(filepath.Dir(configPath()), "sources.ini") }
 func lockPath() string    { return filepath.Join(filepath.Dir(configPath()), "sources.lock") }
