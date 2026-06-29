@@ -3,7 +3,7 @@
 // Each forge differs in three things only — the endpoint URL, the JSON shape,
 // and the auth header — so a small per-forge adapter normalizes all of them
 // into the shared release/asset structs the rest of `up` consumes.
-package src
+package base
 
 import (
 	"encoding/json"

@@ -1,6 +1,6 @@
 // Config and env override logic. Every ini key has an env var
 // equivalent (allow-insecure -> ALLOW_INSECURE); env wins.
-package src
+package base
 
 import (
 	"bufio"

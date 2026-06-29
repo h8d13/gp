@@ -2,7 +2,7 @@
 // terminal, so piped or redirected runs (scripts, tests, `gp ... | foo`)
 // stay byte-clean. A single goroutine owns all rendering; writers just
 // bump an atomic counter, which keeps the parallel path lock-free.
-package src
+package base
 
 import (
 	"fmt"

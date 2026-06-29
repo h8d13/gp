@@ -5,7 +5,7 @@
 // changed. The version is the release tag for a forge, else the HTTP validator
 // (ETag/Last-Modified). A lockfile records what is installed, so an unchanged
 // upstream is a no-op and no per-tool version parsing is needed.
-package src
+package base
 
 import (
 	"fmt"

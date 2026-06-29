@@ -1,7 +1,7 @@
 // Retry with backoff for rate-limit / transient responses. Only 429 and 503
 // retry: they mean "try later". Connection errors are returned as-is so a
 // real failure is not masked by silent re-dials.
-package src
+package base
 
 import (
 	"fmt"

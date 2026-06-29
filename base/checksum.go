@@ -3,7 +3,7 @@
 // asset is hashed and compared before it is placed or extracted, so a tampered
 // or truncated release is never installed. A source that pins nothing skips all
 // of this -- verification is opt-in per source.
-package src
+package base
 
 import (
 	"crypto/sha256"

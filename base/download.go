@@ -2,7 +2,7 @@
 // helps when the bottleneck is per-connection (CDN throttle, high-BDP
 // path); for small bodies the extra handshakes lose, so callers gate on
 // size via prefs.ParallelMin before reaching here.
-package src
+package base
 
 import (
 	"fmt"

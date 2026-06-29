@@ -1,7 +1,7 @@
 // Atomic JSON sidecar read/write, shared by the resume manifest (.gp-part) and
 // the cache meta (.gp-meta). Both persist a tiny struct beside the download and
 // must survive a crash mid-write, so writes go through a temp file + rename.
-package src
+package base
 
 import (
 	"encoding/json"

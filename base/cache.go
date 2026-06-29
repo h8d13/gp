@@ -6,7 +6,7 @@
 // HTTP caching -- what curl does only with --etag-compare / -z, here automatic
 // and reversible with --force. The conditional request also doubles as the
 // size/range probe on a 200, so it adds no round-trip when the file did change.
-package src
+package base
 
 import (
 	"net/http"

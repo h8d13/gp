@@ -9,7 +9,7 @@
 // exactly the four below. deflate is intentionally absent -- the HTTP "deflate"
 // coding is ambiguous in the wild (raw RFC 1951 vs zlib-wrapped RFC 1950) and
 // effectively unused, so it is documented as unsupported rather than guessed.
-package src
+package base
 
 import (
 	"compress/gzip"

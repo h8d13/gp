@@ -10,7 +10,7 @@
 // Symlinks themselves may point anywhere (a rootfs tarball legitimately ships
 // absolute links like /etc/machine-id); they are inert until something writes
 // through them, and within() blocks exactly that.
-package src
+package base
 
 import (
 	"archive/tar"
