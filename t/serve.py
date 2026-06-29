@@ -22,6 +22,10 @@
 #               embed the dynamic asset download URL. The requested path is
 #               appended to the "apipath" file so a test can assert the
 #               forge built the right endpoint (e.g. GitLab's %2F encoding).
+#   SERVE_INDEX  path to an HTML file served (as text/html) for any request
+#               path ending in "/" -- a directory-index listing for an index
+#               source to resolve a file from; the linked files are served by
+#               the normal body path.
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
@@ -105,6 +109,19 @@ class H(http.server.BaseHTTPRequestHandler):
         open("ua", "w").write(self.headers.get("User-Agent", ""))
         # Forge release API: any ".../releases/.../latest" path returns the
         # SERVE_RELEASE JSON, read fresh so the test can write it post-bind.
+        # Directory index: a path ending in "/" returns the SERVE_INDEX HTML
+        # (a listing of <a href> file links) so an index source can resolve a
+        # file from it; the linked files are served by the normal body path.
+        idxfile = os.environ.get("SERVE_INDEX")
+        if idxfile and self.path.endswith("/"):
+            with open(idxfile, "rb") as fh:
+                payload = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         relfile = os.environ.get("SERVE_RELEASE")
         if relfile and "releases" in self.path and self.path.endswith("latest"):
             with lock:

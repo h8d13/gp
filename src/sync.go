@@ -23,6 +23,7 @@ import (
 type source struct {
 	name  string   // the section name, e.g. CODIUM
 	url   string   // direct file URL; when set this is a bare-url source
+	index string   // directory-index URL; pick a file from its links by match/ext
 	forge string   // github (default) | gitea | gitlab
 	host  string   // API host; "" uses the forge default (self-host override)
 	repo  string   // owner/repo (project path) on the forge
@@ -57,6 +58,7 @@ func loadSources(path string) ([]source, error) {
 		s := source{
 			name:  name,
 			url:   sec["url"],
+			index: sec["index"],
 			forge: sec["forge"],
 			host:  sec["host"],
 			repo:  sec["repo"],
@@ -73,16 +75,21 @@ func loadSources(path string) ([]source, error) {
 		if strings.ContainsRune(s.as, '/') {
 			return nil, fmt.Errorf("[%s]: as must be a bare filename, not a path", name)
 		}
-		// A bare-url source skips the whole forge/release machinery; the URL
-		// is the file. Otherwise it is a forge release and needs repo + a
-		// known forge.
-		if s.url == "" {
-			if s.repo == "" {
-				return nil, fmt.Errorf("[%s]: url or repo is required", name)
+		// Resolve the source type, in precedence order: a bare url is the file
+		// itself; an index is a listing to pick one file from; otherwise it is
+		// a forge release. Each later field is ignored once an earlier one wins.
+		switch {
+		case s.url != "":
+		case s.index != "":
+			if len(s.match) == 0 && s.ext == "" {
+				return nil, fmt.Errorf("[%s]: index needs match or ext to pick a file", name)
 			}
+		case s.repo != "":
 			if _, err := forgeFor(s.forge); err != nil {
 				return nil, fmt.Errorf("[%s]: %w", name, err)
 			}
+		default:
+			return nil, fmt.Errorf("[%s]: url, index, or repo is required", name)
 		}
 		srcs = append(srcs, s)
 	}
@@ -148,6 +155,9 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	if s.url != "" {
 		return syncURL(client, s, have, p, rp)
 	}
+	if s.index != "" {
+		return syncIndex(client, s, have, p, rp)
+	}
 	f, err := forgeFor(s.forge) // already validated in loadSources
 	if err != nil {
 		return "", err
@@ -176,15 +186,38 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	return rel.TagName, nil
 }
 
-// syncURL handles a bare-url source. There is no release to resolve, so the
-// HTTP validator (ETag, else Last-Modified) is the version: a HEAD reads it,
-// and when it still matches the lock and the dest is populated nothing is
-// refetched. The file is placed like any asset (tarball extracted, anything
-// else saved under the URL's basename). Returns the validator to record, or ""
-// when the server offers none (then every run reinstalls).
+// syncURL handles a bare-url source: the URL is the file, installed under its
+// own basename (or `as`). Versioning is the HTTP validator (see installFile).
 func syncURL(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
-	name := destName(s, urlBase(s.url))
-	validator := headValidator(client, s.url, p.UserAgent, rp)
+	return installFile(client, s, destName(s, urlBase(s.url)), s.url, have, p, rp)
+}
+
+// syncIndex handles an index source: fetch the listing, pick the single file
+// matching match/ext, then install it like a bare url (validator-versioned).
+// A listing that keeps multiple matching files (e.g. several dated builds) is
+// an ambiguous pick and errors with the candidates, so point an index source
+// at a "latest"-style directory or tighten match/ext.
+func syncIndex(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
+	rel, err := fetchIndex(client, s.index, p.UserAgent, rp)
+	if err != nil {
+		return "", err
+	}
+	a, err := rel.pickAsset(s.match, s.ext)
+	if err != nil {
+		return "", err
+	}
+	return installFile(client, s, destName(s, a.Name), a.URL, have, p, rp)
+}
+
+// installFile installs the concrete file at fileURL for a source whose version
+// is the HTTP validator (ETag, else Last-Modified) rather than a release tag:
+// a HEAD reads it, and when it still matches the lock and the dest is populated
+// nothing is refetched. The file is placed like any asset (tarball extracted,
+// anything else saved under name). Returns the validator to record, or "" when
+// the server offers none (then every run reinstalls). Shared by the bare-url
+// and index sources, which differ only in how they arrive at fileURL.
+func installFile(client *http.Client, s source, name, fileURL, have string, p prefs, rp retryPolicy) (string, error) {
+	validator := headValidator(client, fileURL, p.UserAgent, rp)
 	if validator != "" && validator == have && destPopulated(s.dest) {
 		fmt.Printf("%s: up to date\n", s.name)
 		return "", nil
@@ -194,7 +227,7 @@ func syncURL(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	} else {
 		fmt.Printf("%s: updating %s\n", s.name, name)
 	}
-	if err := install(client, asset{Name: name, URL: s.url}, s, p, rp); err != nil {
+	if err := install(client, asset{Name: name, URL: fileURL}, s, p, rp); err != nil {
 		return "", err
 	}
 	return validator, nil

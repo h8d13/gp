@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"regexp"
 	"strings"
 )
 
@@ -207,6 +209,76 @@ func parseGitLab(body []byte) (release, error) {
 			u = l.URL
 		}
 		rel.Assets = append(rel.Assets, asset{Name: l.Name, URL: u})
+	}
+	return rel, nil
+}
+
+// hrefRe pulls the target out of every href attribute on a page. A directory
+// index (Apache/nginx/python -m http.server autoindex, and most distro
+// mirrors) is just a list of <a href="file">; matching the attribute is looser
+// than parsing HTML but needs no dependency, and the looseness is harmless:
+// pickAsset's match/ext gate discards every link that is not the file the
+// source asked for, so stray nav/sort/CSS hrefs never reach the caller.
+var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
+
+// fetchIndex GETs a directory-index page and resolves its file links into the
+// same normalized asset list a forge release produces, so pickAsset can choose
+// among them by match/ext. base names the release for error messages.
+func fetchIndex(client *http.Client, indexURL, ua string, rp retryPolicy) (release, error) {
+	req, err := http.NewRequest(http.MethodGet, indexURL, nil)
+	if err != nil {
+		return release{}, err
+	}
+	if ua == "" {
+		ua = "gp"
+	}
+	req.Header.Set("User-Agent", ua)
+	resp, err := doRetry(client, req, rp)
+	if err != nil {
+		return release{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return release{}, fmt.Errorf("%s: %s", indexURL, resp.Status)
+	}
+	return parseIndex(indexURL, body)
+}
+
+// parseIndex extracts file links from a directory-index body, each resolved
+// against base into an absolute URL with the trailing path segment as its
+// name. Links with no usable filename (the parent dir, "?C=N" sort headers,
+// directory entries ending in "/") are skipped, and duplicates collapse.
+func parseIndex(base string, body []byte) (release, error) {
+	bu, err := url.Parse(base)
+	if err != nil {
+		return release{}, fmt.Errorf("index url %q: %w", base, err)
+	}
+	rel := release{TagName: base} // base shows up in pickAsset's error context
+	seen := map[string]bool{}
+	for _, m := range hrefRe.FindAllSubmatch(body, -1) {
+		ref, err := url.Parse(string(m[1]))
+		if err != nil {
+			continue
+		}
+		abs := bu.ResolveReference(ref)
+		if abs.Scheme != "http" && abs.Scheme != "https" {
+			continue // mailto:, javascript:, ...
+		}
+		name := path.Base(abs.Path)
+		if name == "" || name == "." || name == "/" || strings.HasSuffix(abs.Path, "/") {
+			continue // a directory or parent link, not a file
+		}
+		abs.RawQuery, abs.Fragment = "", ""
+		key := abs.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rel.Assets = append(rel.Assets, asset{Name: name, URL: key})
+	}
+	if len(rel.Assets) == 0 {
+		return release{}, fmt.Errorf("%s: no file links found", base)
 	}
 	return rel, nil
 }

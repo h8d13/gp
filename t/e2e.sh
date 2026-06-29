@@ -542,4 +542,67 @@ dest = $PWD/inst
 	! test -e inst/payload.tar.gz   # archive staged in temp, not left in dest
 '
 
+# --- index sources (pick a file from a directory listing) ------------
+# A directory-index page lists several files; the source picks one by match/ext
+# (here the tarball, not its .sig or the checksum file), then installs it like
+# a bare url. The parent-dir and sort-header hrefs must be ignored by the parser.
+INDEX_HTML='<html><body>
+<a href="../">Parent Directory</a>
+<a href="?C=N;O=D">Name</a>
+<a href="archlinux-bootstrap-x86_64.tar.gz">archlinux-bootstrap-x86_64.tar.gz</a>
+<a href="archlinux-bootstrap-x86_64.tar.gz.sig">sig</a>
+<a href="sha256sums.txt">sha256sums.txt</a>
+</body></html>'
+
+test_expect_success TAR 'up resolves a tarball from a directory index and extracts it' '
+	mkdir srci && echo hello >srci/file.txt && tar czf app.tgz -C srci . &&
+	printf "%s" "$INDEX_HTML" >index.html &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_INDEX="$PWD/index.html" SERVE_ETAG=idx1 && serve http &&
+	write_sources "[ARCHISO]
+index = $URL/iso/latest/
+match = bootstrap x86_64
+ext   = tar.gz
+dest  = $PWD/inst
+" &&
+	gp up && test "$code" = 0 &&
+	contains "installing archlinux-bootstrap-x86_64.tar.gz" "$out" &&
+	test "$(cat inst/file.txt)" = hello &&
+	grep -q "ARCHISO = idx1" "$LOCK"
+'
+
+test_expect_success TAR 'up index is a no-op when the picked file is unchanged' '
+	mkdir srci && echo hello >srci/file.txt && tar czf app.tgz -C srci . &&
+	printf "%s" "$INDEX_HTML" >index.html &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_INDEX="$PWD/index.html" SERVE_ETAG=idx1 && serve http &&
+	write_sources "[ARCHISO]
+index = $URL/iso/latest/
+match = bootstrap
+ext   = tar.gz
+dest  = $PWD/inst
+" &&
+	gp up && test "$code" = 0 &&
+	gp up && test "$code" = 0 && contains "up to date" "$out"
+'
+
+test_expect_success 'up index errors on an ambiguous match' '
+	printf "%s" "<a href=\"tool-1.0-linux.tar.gz\">a</a><a href=\"tool-1.1-linux.tar.gz\">b</a>" >index.html &&
+	export SERVE_INDEX="$PWD/index.html" && serve http &&
+	write_sources "[TOOL]
+index = $URL/d/
+match = linux
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 &&
+	contains "ambiguous" "$out" && ! test -e "$LOCK"
+'
+
+test_expect_success 'up index requires match or ext to pick a file' '
+	write_sources "[TOOL]
+index = http://example.invalid/d/
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "match or ext" "$out"
+'
+
 test_done
