@@ -2,7 +2,11 @@ module github.com/h8d13/gp
 
 go 1.26.4
 
-require github.com/quic-go/quic-go v0.60.0
+require (
+	github.com/klauspost/compress v1.18.6
+	github.com/quic-go/quic-go v0.60.0
+	github.com/ulikunitz/xz v0.5.15
+)
 
 require (
 	github.com/quic-go/qpack v0.6.0 // indirect

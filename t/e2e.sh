@@ -54,9 +54,12 @@ serve() {
 test_expect_success() {
 	if [ $# -eq 3 ]; then prereq=$1; shift; else prereq=; fi
 	test_count=$((test_count + 1))
-	if [ -n "$prereq" ] && ! have_prereq "$prereq"; then
-		say "ok $test_count - $1 # SKIP (need $prereq)"; return
-	fi
+	# prereq may name several space-separated tags; all must be present.
+	for pr in $prereq; do
+		if ! have_prereq "$pr"; then
+			say "ok $test_count - $1 # SKIP (need $pr)"; return
+		fi
+	done
 	d="$TRASH/$test_count" && mkdir -p "$d"
 	if ( cd "$d" && eval "$2" ) >"$LOG" 2>&1; then
 		say "ok $test_count - $1"
@@ -77,6 +80,9 @@ go build -C "$ROOT" -o out/ . || { echo "build failed"; exit 1; }
 openssl req -x509 -newkey rsa:2048 -keyout "$CERT" -out "$CERT" \
 	-days 1 -nodes -subj /CN=localhost >/dev/null 2>&1 && test_set_prereq TLS
 command -v tar >/dev/null 2>&1 && test_set_prereq TAR
+command -v zstd >/dev/null 2>&1 && test_set_prereq ZSTD
+command -v xz >/dev/null 2>&1 && test_set_prereq XZ
+command -v bzip2 >/dev/null 2>&1 && test_set_prereq BZIP2
 
 # --- config: User-Agent ----------------------------------------------
 test_expect_success 'User-Agent comes from ini [user]' '
@@ -268,6 +274,44 @@ test_expect_success 'resume restarts when the validator changed' '
 	test ! -e out.bin.gp-part
 '
 
+# --- conditional-request cache (304 on an unchanged second run) ------
+# First download records the validator in a .gp-meta sidecar; the second run
+# replays it as If-None-Match, the server answers 304, and gp skips the
+# transfer entirely (curl re-downloads by default).
+test_expect_success 'second run is skipped via 304 when the file is unchanged' '
+	export SERVE_SIZE=4096 SERVE_ETAG=v1 && serve http &&
+	gp -o out.bin "$URL" && test "$code" = 0 && test -f out.bin.gp-meta &&
+	gp -o out.bin "$URL" && test "$code" = 0 && contains "304 Not Modified" "$out"
+'
+
+# --force ignores the cache and refetches even when it is still current.
+test_expect_success 'force re-downloads despite a fresh cache' '
+	export SERVE_SIZE=4096 SERVE_ETAG=v1 && serve http &&
+	gp -o out.bin "$URL" && test "$code" = 0 &&
+	gp -f -o out.bin "$URL" && test "$code" = 0 && contains "200 OK" "$out"
+'
+
+# The cache is keyed to the URL it was written for: a different source URL to
+# the same path must not trigger a false 304.
+test_expect_success 'cache is not reused for a different URL' '
+	export SERVE_SIZE=4096 SERVE_ETAG=v1 && serve http &&
+	gp -o out.bin "$URL/a" && test "$code" = 0 &&
+	gp -o out.bin "$URL/b" && test "$code" = 0 && contains "200 OK" "$out"
+'
+
+# A pending resume (a .gp-part manifest on disk) must suppress the conditional:
+# the local file is incomplete, so a 304 "you already have it" would be wrong.
+test_expect_success 'a pending resume suppresses the conditional request' '
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 CHUNK_BYTES=$((64 * 1024)) &&
+	serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	cp ref.bin out.bin &&
+	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,false,true,false]}" >out.bin.gp-part &&
+	printf "%s" "{\"url\":\"$URL\",\"etag\":\"v1\"}" >out.bin.gp-meta &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	test "$code" = 0 && contains "200 OK" "$out" && cmp ref.bin out.bin
+'
+
 # --- archive extraction ----------------------------------------------
 test_expect_success TAR '-x unpacks a downloaded tar.gz' '
 	mkdir src && echo hello >src/file.txt && mkdir src/sub && echo deep >src/sub/n.txt &&
@@ -314,6 +358,39 @@ test_expect_success TAR 'parallel split then -x extracts the reassembled archive
 	gp "$URL" -o arc.tar -x dest && test "$code" = 0 &&
 	test "$(wc -c <dest/big.txt | tr -d " ")" = 20000 &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" -ge 4
+'
+
+# Codec is detected by magic bytes, not the filename, so each compressed tar
+# unpacks the same as a plain one. One test per codec, skipped if the matching
+# compressor is absent on the box.
+test_expect_success "TAR ZSTD" '-x unpacks a tar.zst (magic-detected)' '
+	mkdir src && echo zhello >src/file.txt && tar cf - -C src . | zstd -q -o payload.tar.zst &&
+	export SERVE_FILE="$PWD/payload.tar.zst" && serve http &&
+	gp "$URL" -x dest && test "$code" = 0 && test "$(cat dest/file.txt)" = zhello
+'
+
+test_expect_success "TAR XZ" '-x unpacks a tar.xz (magic-detected)' '
+	mkdir src && echo xhello >src/file.txt && tar cf - -C src . | xz -q >payload.tar.xz &&
+	export SERVE_FILE="$PWD/payload.tar.xz" && serve http &&
+	gp "$URL" -x dest && test "$code" = 0 && test "$(cat dest/file.txt)" = xhello
+'
+
+test_expect_success "TAR BZIP2" '-x unpacks a tar.bz2 (magic-detected)' '
+	mkdir src && echo bhello >src/file.txt && tar cf - -C src . | bzip2 >payload.tar.bz2 &&
+	export SERVE_FILE="$PWD/payload.tar.bz2" && serve http &&
+	gp "$URL" -x dest && test "$code" = 0 && test "$(cat dest/file.txt)" = bhello
+'
+
+# up auto-extracts the same codecs: a .tar.zst asset is unpacked, not saved.
+test_expect_success "TAR ZSTD" 'up extracts a .tar.zst bare-url asset' '
+	mkdir src && echo zdeep >src/f.txt && tar cf - -C src . | zstd -q -o payload.tar.zst &&
+	export SERVE_FILE="$PWD/payload.tar.zst" SERVE_ETAG=v1 && serve http &&
+	write_sources "[ARC]
+url = $URL/dl/payload.tar.zst
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = zdeep &&
+	! test -e inst/payload.tar.zst
 '
 
 test_expect_success TAR '-x stages the temp archive under $TMPDIR and cleans it' '

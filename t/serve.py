@@ -13,7 +13,8 @@
 #               check (max concurrency) rather than a timing race.
 #   SERVE_ETAG  advertise this value as the ETag (a resume validator) on
 #               both the probe and every range reply, so gp persists a
-#               .gp-part manifest and a later run can resume.
+#               .gp-part manifest and a later run can resume. Also answers a
+#               matching If-None-Match with 304, exercising the gp cache.
 #   SERVE_RELEASE  path to a JSON file served (read fresh per request, as
 #               application/json) for any forge "latest release" API path --
 #               i.e. one containing "releases" and ending in "latest". Lets
@@ -133,6 +134,14 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        # Conditional GET: a matching If-None-Match (the validator gp cached
+        # from a prior run) means the file is unchanged -> 304, no body. Only
+        # the full probe carries it; range requests never do.
+        if ETAG and self.headers.get("If-None-Match") == ETAG:
+            self.send_response(304)
+            self.send_header("ETag", ETAG)
+            self.end_headers()
             return
         rng = self.headers.get("Range")
         if rng:

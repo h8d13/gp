@@ -138,6 +138,15 @@ func newClient(p prefs) (*http.Client, func() error) {
 		ResponseHeaderTimeout: 30 * time.Second,
 		ForceAttemptHTTP2:     true, // a custom TLSClientConfig otherwise disables h2
 		TLSClientConfig:       tlsConfig(p),
+		// Default to identity bytes, never gzip. Go otherwise adds
+		// Accept-Encoding: gzip and inflates transparently, which is wrong for a
+		// downloader: the Content-Length then reports the compressed size (bad
+		// split math and progress), Apache's mod_deflate drops Accept-Ranges (no
+		// parallel split), and it rewrites the ETag ("abc" -> "abc-gzip") so a
+		// later conditional request never matches and the 304 fast-path degrades
+		// to a full refetch. Identity is also curl's default. --compress opts
+		// back in for the rare large-text-dump case (and so forfeits those).
+		DisableCompression: !p.Compress,
 	}
 	return &http.Client{Transport: tr}, func() error { return nil }
 }
@@ -166,6 +175,7 @@ func newSplitClient(p prefs) (*http.Client, func() error) {
 		TLSClientConfig:       tlsConfig(p),
 		// non-nil empty map: opt out of the automatic h2 upgrade.
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
+		DisableCompression:  true, // identity bytes; see newClient
 		MaxConnsPerHost:     conns,
 		MaxIdleConns:        conns,
 		MaxIdleConnsPerHost: conns,
@@ -211,6 +221,8 @@ func Main() {
 	intVar(&par, true, -1, "parallel connections; 1 disables", "p", "parallel")
 	var useQuic bool
 	boolVar(&useQuic, true, false, "use HTTP/3 over QUIC", "q", "quic")
+	var compress bool
+	boolVar(&compress, true, false, "accept gzip transfer encoding (disables ranges/resume/304)", "z", "compress")
 	var ret int
 	intVar(&ret, true, -1, "retries on 429/503; 0 disables", "r", "retries")
 	var chk int
@@ -218,7 +230,9 @@ func Main() {
 	var noProg bool
 	boolVar(&noProg, true, false, "disable the live download progress line", "n", "no-progress")
 	var extract string
-	strVar(&extract, false, "", "unpack the downloaded tar/tar.gz into this dir", "x", "extract")
+	strVar(&extract, false, "", "unpack the downloaded tar (gz/zst/xz/bz2) into this dir", "x", "extract")
+	var force bool
+	boolVar(&force, false, false, "re-download even if the cached copy is still current", "f", "force")
 	flag.Usage = usage
 	posArgs := parseArgs()
 
@@ -228,6 +242,9 @@ func Main() {
 	}
 	if wasSet("q", "quic") {
 		p.Quic = useQuic
+	}
+	if wasSet("z", "compress") {
+		p.Compress = compress
 	}
 	if ret >= 0 {
 		p.Retries = ret
@@ -273,6 +290,20 @@ func Main() {
 		req.Header.Set("User-Agent", p.UserAgent)
 	}
 
+	// Replay a prior run's validator as a conditional request, so an unchanged
+	// file comes back 304 and skips the transfer. Only when -o names a file
+	// that is fully on disk (no pending .gp-part resume) and whose cached meta
+	// is for this same URL; --force opts out and always refetches.
+	if out != "" && !force {
+		if _, err := os.Stat(out); err == nil {
+			if _, e := os.Stat(manifestPath(out)); e != nil {
+				if m, ok := loadMeta(metaPath(out)); ok && m.URL == url {
+					m.applyConditional(req)
+				}
+			}
+		}
+	}
+
 	rp := p.retry()
 	start := time.Now()
 	resp, err := doRetry(client, req, rp)
@@ -281,6 +312,13 @@ func Main() {
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+
+	// The conditional matched: bytes on disk are current, nothing to fetch.
+	// (With -x, re-extraction is skipped too; use --force if the dest is gone.)
+	if resp.StatusCode == http.StatusNotModified {
+		fmt.Fprintf(os.Stderr, "%s %s (cached: %s)\n", url, resp.Status, out)
+		return
+	}
 
 	// Saving is explicit: only -o names an output file. With -x but no -o we
 	// still need the bytes on disk, so stage a temp archive (removed after
@@ -339,6 +377,15 @@ func Main() {
 		os.Exit(1)
 	}
 	elapsed := time.Since(start) // download time, reported below
+
+	// Record the validator so the next run for this URL can ask "still
+	// unchanged?" and skip the transfer. Best-effort: a write failure only
+	// forfeits the 304 fast-path next time, it never fails the download.
+	if explicitOut && resp.StatusCode == http.StatusOK {
+		if m, ok := metaFrom(url, resp); ok {
+			_ = m.save(metaPath(out))
+		}
+	}
 
 	var cnt int
 	if extract != "" {

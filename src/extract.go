@@ -1,24 +1,74 @@
-// Tar extraction for downloaded archives. Stdlib only (archive/tar +
-// compress/gzip), gzip auto-detected by magic bytes so plain .tar and
-// gzipped .tar.gz/.tgz both work. Every entry path is validated to stay
-// within destDir, so a hostile archive cannot escape via "../" or an
-// absolute path or a symlink (the classic "Zip Slip").
+// Tar extraction for downloaded archives. The tar payload may be raw or
+// wrapped in gzip, zstd, xz, or bzip2; the codec is picked by magic bytes, not
+// the filename, so a mislabeled archive still unpacks. gzip and bzip2 are
+// stdlib; zstd and xz are pure-Go (no cgo) third-party readers. Every entry
+// path is validated to stay within destDir, so a hostile archive cannot escape
+// via "../" or an absolute path or a symlink (the classic "Zip Slip").
 package src
 
 import (
 	"archive/tar"
 	"bufio"
+	"compress/bzip2"
 	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
-// extractTarGz unpacks the archive at src into destDir and returns the
-// number of entries written. A gzip-compressed archive is gunzipped on
-// the fly; a plain tar is read directly.
+// decompress wraps br in the right decompressor for the tar payload, chosen by
+// leading magic bytes: gzip, zstd, xz, or bzip2; an unrecognized header is read
+// as a plain (uncompressed) tar. Peek does not consume, so the returned reader
+// still starts at byte 0. closeFn releases the codec (nil when none needs it).
+func decompress(br *bufio.Reader) (io.Reader, func() error, error) {
+	// 6 bytes covers the longest signature (xz). Short reads (a tiny archive)
+	// just fall through the length guards to the plain-tar default.
+	magic, _ := br.Peek(6)
+	has := func(sig ...byte) bool {
+		if len(magic) < len(sig) {
+			return false
+		}
+		for i, b := range sig {
+			if magic[i] != b {
+				return false
+			}
+		}
+		return true
+	}
+	switch {
+	case has(0x1f, 0x8b): // gzip
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, nil, err
+		}
+		return gz, gz.Close, nil
+	case has(0x28, 0xb5, 0x2f, 0xfd): // zstd
+		zr, err := zstd.NewReader(br)
+		if err != nil {
+			return nil, nil, err
+		}
+		return zr, func() error { zr.Close(); return nil }, nil
+	case has(0xfd, '7', 'z', 'X', 'Z', 0x00): // xz
+		xr, err := xz.NewReader(br)
+		if err != nil {
+			return nil, nil, err
+		}
+		return xr, nil, nil
+	case has('B', 'Z', 'h'): // bzip2
+		return bzip2.NewReader(br), nil, nil
+	default:
+		return br, nil, nil
+	}
+}
+
+// extractTarGz unpacks the archive at src into destDir and returns the number
+// of entries written. Any supported compression wrapper is decoded on the fly
+// (see decompress); a plain tar is read directly.
 func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	f, err := os.Open(src)
 	if err != nil {
@@ -26,17 +76,15 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	}
 	defer f.Close()
 
-	// Count bytes pulled from the archive file, so prog fills 0->100% as
-	// the stream is consumed (gzip reads the compressed bytes through this).
+	// Count bytes pulled from the archive file, so prog fills 0->100% as the
+	// stream is consumed (the decompressor reads compressed bytes through this).
 	br := bufio.NewReader(progReader{f, prog})
-	var r io.Reader = br
-	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
-		gz, err := gzip.NewReader(br)
-		if err != nil {
-			return 0, err
-		}
-		defer gz.Close()
-		r = gz
+	r, closeFn, err := decompress(br)
+	if err != nil {
+		return 0, err
+	}
+	if closeFn != nil {
+		defer closeFn()
 	}
 
 	if err := os.MkdirAll(destDir, 0o755); err != nil {

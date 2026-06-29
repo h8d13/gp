@@ -372,10 +372,23 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	return n, err
 }
 
-// isTarball reports whether name is a tar archive gp can extract.
+// isTarball reports whether name is a tar archive gp can extract: a plain tar
+// or one wrapped in any compression decompress() handles (gzip/zstd/xz/bzip2),
+// in both the .tar.<ext> and short .t<ext> spellings.
 func isTarball(name string) bool {
 	n := strings.ToLower(name)
-	return strings.HasSuffix(n, ".tar") || strings.HasSuffix(n, ".tar.gz") || strings.HasSuffix(n, ".tgz")
+	for _, s := range []string{
+		".tar",
+		".tar.gz", ".tgz",
+		".tar.zst", ".tzst",
+		".tar.xz", ".txz",
+		".tar.bz2", ".tbz2", ".tbz",
+	} {
+		if strings.HasSuffix(n, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // destPopulated reports whether dest exists and is non-empty, so a matching

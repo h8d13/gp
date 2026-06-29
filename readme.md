@@ -20,6 +20,8 @@ Global options (all commands):
     	parallel connections; 1 disables
   -q, --quic
     	use HTTP/3 over QUIC
+  -z, --compress
+    	accept gzip transfer encoding (disables ranges/resume/304)
   -r, --retries int
     	retries on 429/503; 0 disables
   -c, --chunk int
@@ -31,7 +33,9 @@ Download options (URL form only):
   -o, --output string
     	save the response body to this path (otherwise stdout)
   -x, --extract string
-    	unpack the downloaded tar/tar.gz into this dir
+    	unpack the downloaded tar (gz/zst/xz/bz2) into this dir
+  -f, --force
+    	re-download even if the cached copy is still current
 ```
 
 ## Configuration
