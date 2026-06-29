@@ -68,6 +68,7 @@ func usage() {
 	out := flag.CommandLine.Output()
 	name := filepath.Base(os.Args[0])
 	fmt.Fprintf(out, "Usage: %s [flags] URL [FILE]\n", name)
+	fmt.Fprintf(out, "       %s up [NAME...]   install/update tools from sources.ini\n", name)
 	fmt.Fprintf(out, "  FILE, if given, is where to save (default: the URL's basename)\n")
 	for _, g := range flagGroups {
 		var spell []string
@@ -160,6 +161,13 @@ func urlScheme(url string, encrypt bool) string {
 
 // Main is the CLI entry point, invoked by the root package's main().
 func Main() {
+	// The `up` subcommand is a separate verb from the URL fetcher: handle it
+	// before flag parsing so its args don't collide with the download flags.
+	if len(os.Args) > 1 && os.Args[1] == "up" {
+		upMain(os.Args[2:], loadPrefs(configPath(), ".env"))
+		return
+	}
+
 	var out string
 	strVar(&out, "", "save response body to file", "o", "output")
 	var par int

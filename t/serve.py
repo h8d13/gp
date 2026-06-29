@@ -14,6 +14,14 @@
 #   SERVE_ETAG  advertise this value as the ETag (a resume validator) on
 #               both the probe and every range reply, so gp persists a
 #               .gp-part manifest and a later run can resume.
+#   SERVE_RELEASE  path to a JSON file served (read fresh per request, as
+#               application/json) for any forge "latest release" API path --
+#               i.e. one containing "releases" and ending in "latest". Lets
+#               `gp up` resolve a release without the network; the file is
+#               written by the test AFTER serve prints its URL, so it can
+#               embed the dynamic asset download URL. The requested path is
+#               appended to the "apipath" file so a test can assert the
+#               forge built the right endpoint (e.g. GitLab's %2F encoding).
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
@@ -81,6 +89,20 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _serve(self):
         open("ua", "w").write(self.headers.get("User-Agent", ""))
+        # Forge release API: any ".../releases/.../latest" path returns the
+        # SERVE_RELEASE JSON, read fresh so the test can write it post-bind.
+        relfile = os.environ.get("SERVE_RELEASE")
+        if relfile and "releases" in self.path and self.path.endswith("latest"):
+            with lock:
+                open("apipath", "a").write(self.path + "\n")
+            with open(relfile, "rb") as fh:
+                payload = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         rng = self.headers.get("Range")
         if rng:
             lo, hi = (int(v) for v in rng.replace("bytes=", "").split("-"))

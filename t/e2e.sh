@@ -39,6 +39,8 @@ gp() { out=$("$GP" "$@" 2>&1); code=$?; }
 contains() { case "$2" in *"$1"*) return 0 ;; esac; echo "missing [$1] in: $2"; return 1; }
 # write gp config ($1) under a fresh XDG dir and point gp at it
 write_ini() { mkdir -p xdg/gp && printf '%s' "$1" >xdg/gp/gpconfig.ini && export XDG_CONFIG_HOME="$PWD/xdg"; }
+# write sources.ini ($1) under a fresh XDG dir; LOCK points at its sidecar lock
+write_sources() { mkdir -p xdg/gp && printf '%s' "$1" >xdg/gp/sources.ini && export XDG_CONFIG_HOME="$PWD/xdg" LOCK="$PWD/xdg/gp/sources.lock"; }
 
 stop_server() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; SERVER_PID=; }
 # start serve.py ($@); set $URL and $HOST, auto-kill on subshell exit
@@ -286,6 +288,138 @@ test_expect_success TAR '-x rejects path traversal (../ escape)' '
 	export SERVE_FILE="$PWD/bad.tar" && serve http &&
 	gp "$URL" -x dest; test "$code" != 0 &&
 	contains "unsafe path" "$out" && ! test -e ../escaped
+'
+
+# --- up: forge release sync ------------------------------------------
+# serve.py SERVE_RELEASE returns a release JSON for the forge "latest" API
+# path (read fresh, so the test embeds the dynamic asset URL after bind), and
+# serves the SERVE_FILE archive as the asset body. host=$URL forces gp's forge
+# adapter at the local server over http (forgeBase honors an explicit scheme).
+# Tag-vs-lock comparison is gp's whole version check, so these exercise both
+# the fetch/extract path and the install-only-when-newer logic.
+
+# helper: write a github/gitea-shaped release JSON for asset name $1 at the
+# served asset URL, tagged $2, into rel.json
+gh_release() { printf '{"tag_name":"%s","assets":[{"name":"%s","browser_download_url":"%s/dl/%s","size":1}]}' "$2" "$1" "$URL" "$1" >rel.json; }
+
+test_expect_success TAR 'up installs a github release, extracts it, records the tag' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing v1.0.0" "$out" &&
+	test "$(cat inst/file.txt)" = hello &&
+	grep -q "TOOL = v1.0.0" "$LOCK"
+'
+
+test_expect_success TAR 'up is a no-op when the lock tag matches the release' '
+	mkdir srcd && echo hi >srcd/f.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 &&
+	gp up && test "$code" = 0 && contains "up to date (v1.0.0)" "$out"
+'
+
+test_expect_success TAR 'up updates when the release tag is newer than the lock' '
+	mkdir srcd && echo hi >srcd/f.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 && gp up && test "$code" = 0 &&
+	gh_release tool-linux-amd64.tar.gz v2.0.0 && gp up && test "$code" = 0 &&
+	contains "v1.0.0 -> v2.0.0" "$out" && grep -q "TOOL = v2.0.0" "$LOCK"
+'
+
+test_expect_success TAR 'up re-fetches when dest is gone despite a matching lock' '
+	mkdir srcd && echo back >srcd/f.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && rm -rf inst &&
+	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = back
+'
+
+test_expect_success 'up saves a non-archive asset as a file in dest' '
+	printf binary >payload.bin &&
+	export SERVE_FILE="$PWD/payload.bin" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.bin v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = bin
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 &&
+	test "$(cat inst/tool-linux-amd64.bin)" = binary
+'
+
+test_expect_success 'up errors (and lists candidates) on an ambiguous match' '
+	export SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	printf "%s" "{\"tag_name\":\"v1\",\"assets\":[{\"name\":\"a-linux.tar.gz\",\"browser_download_url\":\"$URL/dl/a\"},{\"name\":\"b-linux.tar.gz\",\"browser_download_url\":\"$URL/dl/b\"}]}" >rel.json &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 &&
+	contains "ambiguous" "$out" && contains "a-linux.tar.gz" "$out" &&
+	! test -e "$LOCK"
+'
+
+# GitLab differs in both the JSON shape (assets.links/direct_asset_url, no
+# size) and the endpoint (project path URL-encoded, so the slash is %2F);
+# apipath records the path gp requested so we can assert the encoding.
+test_expect_success TAR 'up resolves a gitlab release (assets.links + %2F path)' '
+	mkdir srcd && echo gl >srcd/f.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	printf "%s" "{\"tag_name\":\"v3.0.0\",\"assets\":{\"links\":[{\"name\":\"tool_linux_amd64.tar.gz\",\"direct_asset_url\":\"$URL/dl/tool.tar.gz\"}]}}" >rel.json &&
+	write_sources "[TOOL]
+forge = gitlab
+host = $URL
+repo = group/proj
+match = linux_amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing v3.0.0" "$out" &&
+	test "$(cat inst/f.txt)" = gl &&
+	grep -q "projects/group%2Fproj/releases/permalink/latest" apipath
+'
+
+test_expect_success 'up rejects an unknown forge before any fetch' '
+	write_sources "[TOOL]
+forge = bitbucket
+repo = owner/tool
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "unknown forge" "$out"
 '
 
 test_done
