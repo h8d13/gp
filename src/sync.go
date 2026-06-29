@@ -7,21 +7,28 @@ package src
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// source is one [NAME] section of sources.ini.
+// source is one [NAME] section of sources.ini. A source is either a forge
+// release (repo + match/ext on a forge) or a bare url (a direct file link);
+// url, when set, takes over and the forge fields are ignored.
 type source struct {
 	name  string   // the section name, e.g. CODIUM
+	url   string   // direct file URL; when set this is a bare-url source
 	forge string   // github (default) | gitea | gitlab
 	host  string   // API host; "" uses the forge default (self-host override)
 	repo  string   // owner/repo (project path) on the forge
 	match []string // substrings the asset name must all contain
 	ext   string   // extension the asset name must end with
+	as    string   // rename a single-file install to this name (archives ignore it)
 	dest  string   // where to install (extract dir, or file dir for non-tar)
 }
 
@@ -49,20 +56,33 @@ func loadSources(path string) ([]source, error) {
 		sec := cfg[name]
 		s := source{
 			name:  name,
+			url:   sec["url"],
 			forge: sec["forge"],
 			host:  sec["host"],
 			repo:  sec["repo"],
 			ext:   sec["ext"],
+			as:    sec["as"],
 			dest:  expandHome(sec["dest"]),
 		}
 		if f := strings.Fields(sec["match"]); len(f) > 0 {
 			s.match = f
 		}
-		if s.repo == "" || s.dest == "" {
-			return nil, fmt.Errorf("[%s]: repo and dest are required", name)
+		if s.dest == "" {
+			return nil, fmt.Errorf("[%s]: dest is required", name)
 		}
-		if _, err := forgeFor(s.forge); err != nil {
-			return nil, fmt.Errorf("[%s]: %w", name, err)
+		if strings.ContainsRune(s.as, '/') {
+			return nil, fmt.Errorf("[%s]: as must be a bare filename, not a path", name)
+		}
+		// A bare-url source skips the whole forge/release machinery; the URL
+		// is the file. Otherwise it is a forge release and needs repo + a
+		// known forge.
+		if s.url == "" {
+			if s.repo == "" {
+				return nil, fmt.Errorf("[%s]: url or repo is required", name)
+			}
+			if _, err := forgeFor(s.forge); err != nil {
+				return nil, fmt.Errorf("[%s]: %w", name, err)
+			}
 		}
 		srcs = append(srcs, s)
 	}
@@ -125,6 +145,9 @@ func upMain(p prefs) {
 // from have (the recorded installed tag) or the destination is missing. It
 // returns the newly installed tag, or "" when nothing changed.
 func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
+	if s.url != "" {
+		return syncURL(client, s, have, p, rp)
+	}
 	f, err := forgeFor(s.forge) // already validated in loadSources
 	if err != nil {
 		return "", err
@@ -153,6 +176,63 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	return rel.TagName, nil
 }
 
+// syncURL handles a bare-url source. There is no release to resolve, so the
+// HTTP validator (ETag, else Last-Modified) is the version: a HEAD reads it,
+// and when it still matches the lock and the dest is populated nothing is
+// refetched. The file is placed like any asset (tarball extracted, anything
+// else saved under the URL's basename). Returns the validator to record, or ""
+// when the server offers none (then every run reinstalls).
+func syncURL(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
+	name := destName(s, urlBase(s.url))
+	validator := headValidator(client, s.url, p.UserAgent, rp)
+	if validator != "" && validator == have && destPopulated(s.dest) {
+		fmt.Printf("%s: up to date\n", s.name)
+		return "", nil
+	}
+	if have == "" {
+		fmt.Printf("%s: installing %s\n", s.name, name)
+	} else {
+		fmt.Printf("%s: updating %s\n", s.name, name)
+	}
+	if err := install(client, asset{Name: name, URL: s.url}, s, p, rp); err != nil {
+		return "", err
+	}
+	return validator, nil
+}
+
+// headValidator returns the URL's ETag (else Last-Modified) via a HEAD request,
+// or "" when the request fails or the server offers neither. It is advisory: a
+// "" only forces a reinstall, never an error.
+func headValidator(client *http.Client, rawURL, ua string, rp retryPolicy) string {
+	req, err := http.NewRequest(http.MethodHead, rawURL, nil)
+	if err != nil {
+		return ""
+	}
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	resp, err := doRetry(client, req, rp)
+	if err != nil {
+		return ""
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	return validatorOf(resp)
+}
+
+// urlBase derives a filename from a URL's last path segment, falling back to
+// "download" when the URL carries no usable name.
+func urlBase(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		if b := path.Base(u.Path); b != "" && b != "." && b != "/" {
+			return b
+		}
+	}
+	return "download"
+}
+
 // install downloads asset and places it at s.dest: tar/tar.gz/tgz archives are
 // extracted into the directory; anything else (AppImage, .deb, a bare binary)
 // is saved as a file in it. The archive is staged in a temp file and removed
@@ -178,12 +258,49 @@ func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) er
 		return err
 	}
 
-	// Non-archive asset: drop it into dest under its own name.
+	// Non-archive asset: drop it into dest under its own name, then mark it
+	// executable when it looks runnable (a binary or a script), so a tool
+	// fetched this way works without a manual chmod.
 	if err := os.MkdirAll(s.dest, 0o755); err != nil {
 		return err
 	}
-	_, err := fetchToFile(client, a.URL, filepath.Join(s.dest, a.Name), p, rp, "DL")
-	return err
+	out := filepath.Join(s.dest, destName(s, a.Name))
+	if _, err := fetchToFile(client, a.URL, out, p, rp, "DL"); err != nil {
+		return err
+	}
+	return makeExecutableIfRunnable(out)
+}
+
+// destName is the filename a single-file asset is saved under: the source's
+// `as` override when set, otherwise the asset's own name.
+func destName(s source, fallback string) string {
+	if s.as != "" {
+		return s.as
+	}
+	return fallback
+}
+
+// makeExecutableIfRunnable sets the execute bits on fp when its first bytes
+// look like something meant to run: an ELF binary (covers AppImages too) or a
+// "#!" script. Archives, .deb/.rpm, and plain data files are left untouched.
+func makeExecutableIfRunnable(fp string) error {
+	f, err := os.Open(fp)
+	if err != nil {
+		return err
+	}
+	var head [4]byte
+	n, _ := io.ReadFull(f, head[:])
+	f.Close()
+	runnable := (n >= 4 && string(head[:]) == "\x7fELF") ||
+		(n >= 2 && head[0] == '#' && head[1] == '!')
+	if !runnable {
+		return nil
+	}
+	fi, err := os.Stat(fp)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(fp, fi.Mode()|0o111)
 }
 
 // fetchToFile streams url to out with a progress bar, following redirects (the

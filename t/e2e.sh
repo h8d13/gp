@@ -464,4 +464,55 @@ dest = $PWD/inst
 	gp up; test "$code" != 0 && contains "unknown forge" "$out"
 '
 
+# --- up: bare-url sources --------------------------------------------
+# A `url` key is a direct file link: no forge, no release. The HTTP validator
+# (SERVE_ETAG here) is the version, read via a HEAD probe; a runnable file
+# (ELF or "#!" script) is marked executable on install.
+
+test_expect_success 'up installs a bare-url file and makes a script executable' '
+	printf "#!/bin/sh\necho hi\n" >grim &&
+	export SERVE_FILE="$PWD/grim" SERVE_ETAG=v1 && serve http &&
+	write_sources "[GRIM]
+url = $URL/bin/grim
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing grim" "$out" &&
+	test -x inst/grim && cmp grim inst/grim &&
+	grep -q "GRIM = v1" "$LOCK"
+'
+
+test_expect_success 'up is a no-op for a bare-url whose validator is unchanged' '
+	printf "#!/bin/sh\necho hi\n" >grim &&
+	export SERVE_FILE="$PWD/grim" SERVE_ETAG=v1 && serve http &&
+	write_sources "[GRIM]
+url = $URL/bin/grim
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 &&
+	gp up && test "$code" = 0 && contains "up to date" "$out"
+'
+
+test_expect_success 'up renames a single-file install via as=' '
+	printf "#!/bin/sh\necho hi\n" >grim &&
+	export SERVE_FILE="$PWD/grim" SERVE_ETAG=v1 && serve http &&
+	write_sources "[GRIM]
+url = $URL/bin/bash2048.sh
+as  = 2048
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing 2048" "$out" &&
+	test -x inst/2048 && ! test -e inst/bash2048.sh && cmp grim inst/2048
+'
+
+test_expect_success TAR 'up extracts a bare-url tarball into dest' '
+	mkdir srcd && echo deep >srcd/f.txt && tar czf payload.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/payload.tgz" SERVE_ETAG=v1 && serve http &&
+	write_sources "[ARC]
+url = $URL/dl/payload.tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = deep &&
+	! test -e inst/payload.tar.gz   # archive staged in temp, not left in dest
+'
+
 test_done

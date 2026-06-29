@@ -90,6 +90,17 @@ class H(http.server.BaseHTTPRequestHandler):
         finally:
             leave()
 
+    # HEAD answers the validator probe a bare-url source makes before deciding
+    # whether to re-download: same headers as the body GET, no body.
+    def do_HEAD(self):
+        self.send_response(200)
+        if RANGES:
+            self.send_header("Accept-Ranges", "bytes")
+        if ETAG:
+            self.send_header("ETag", ETAG)
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+
     def _serve(self):
         open("ua", "w").write(self.headers.get("User-Agent", ""))
         # Forge release API: any ".../releases/.../latest" path returns the
