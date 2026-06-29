@@ -677,6 +677,32 @@ dest = $PWD/inst
 	! test -e inst/payload.tar.gz   # archive staged in temp, not left in dest
 '
 
+# An archive at an extension-less URL (e.g. GitHub /tarball) is saved as a file
+# by default -- the name carries no archive suffix, so it is not auto-extracted.
+test_expect_success TAR 'up saves an extension-less archive as a file by default' '
+	mkdir srcd && echo deep >srcd/f.txt && tar czf payload.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/payload.tgz" SERVE_ETAG=v1 && serve http &&
+	write_sources "[ARC]
+url = $URL/api/tarball
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test -e inst/tarball && ! test -e inst/f.txt
+'
+
+# extract = true forces the archive path regardless of name, so the same URL
+# now unpacks. Magic-byte detection still picks the codec.
+test_expect_success TAR 'up extract=true forces extraction of an extension-less URL' '
+	mkdir srcd && echo deep >srcd/f.txt && tar czf payload.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/payload.tgz" SERVE_ETAG=v1 && serve http &&
+	write_sources "[ARC]
+url = $URL/api/tarball
+extract = true
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = deep &&
+	! test -e inst/tarball
+'
+
 # --- index sources (pick a file from a directory listing) ------------
 # A directory-index page lists several files; the source picks one by match/ext
 # (here the tarball, not its .sig or the checksum file), then installs it like

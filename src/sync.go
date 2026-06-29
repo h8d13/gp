@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -21,16 +22,17 @@ import (
 // release (repo + match/ext on a forge) or a bare url (a direct file link);
 // url, when set, takes over and the forge fields are ignored.
 type source struct {
-	name  string   // the section name, e.g. CODIUM
-	url   string   // direct file URL; when set this is a bare-url source
-	index string   // directory-index URL; pick a file from its links by match/ext
-	forge string   // github (default) | gitea | gitlab
-	host  string   // API host; "" uses the forge default (self-host override)
-	repo  string   // owner/repo (project path) on the forge
-	match []string // substrings the asset name must all contain
-	ext   string   // extension the asset name must end with
-	as    string   // rename a single-file install to this name (archives ignore it)
-	dest  string   // where to install (extract dir, or file dir for non-tar)
+	name    string   // the section name, e.g. CODIUM
+	url     string   // direct file URL; when set this is a bare-url source
+	index   string   // directory-index URL; pick a file from its links by match/ext
+	forge   string   // github (default) | gitea | gitlab
+	host    string   // API host; "" uses the forge default (self-host override)
+	repo    string   // owner/repo (project path) on the forge
+	match   []string // substrings the asset name must all contain
+	ext     string   // extension the asset name must end with
+	as      string   // rename a single-file install to this name (archives ignore it)
+	dest    string   // where to install (extract dir, or file dir for non-tar)
+	extract bool     // force tar extraction even when the name lacks an archive ext
 }
 
 // sourcesPath and lockPath live beside config.ini so all gp state is in one
@@ -69,6 +71,7 @@ func loadSources(path string) ([]source, error) {
 		if f := strings.Fields(sec["match"]); len(f) > 0 {
 			s.match = f
 		}
+		s.extract, _ = strconv.ParseBool(sec["extract"]) // "" / bad -> false
 		if s.dest == "" {
 			return nil, fmt.Errorf("[%s]: dest is required", name)
 		}
@@ -266,12 +269,14 @@ func urlBase(rawURL string) string {
 	return "download"
 }
 
-// install downloads asset and places it at s.dest: tar/tar.gz/tgz archives are
-// extracted into the directory; anything else (AppImage, .deb, a bare binary)
-// is saved as a file in it. The archive is staged in a temp file and removed
-// afterwards, mirroring the main download path's extract-only handling.
+// install downloads asset and places it at s.dest: tar archives are extracted
+// into the directory; anything else (AppImage, .deb, a bare binary) is saved as
+// a file in it. Extraction fires when the name carries a known archive
+// extension, or when the source sets extract=true (for archive URLs that end in
+// no usable name, e.g. GitHub's /tarball API). The archive is staged in a temp
+// file and removed afterwards, mirroring the main download path.
 func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) error {
-	if isTarball(a.Name) {
+	if s.extract || isTarball(a.Name) {
 		tmp, err := os.CreateTemp("", "gp-up-*")
 		if err != nil {
 			return err
