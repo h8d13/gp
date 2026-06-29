@@ -83,6 +83,8 @@ command -v tar >/dev/null 2>&1 && test_set_prereq TAR
 command -v zstd >/dev/null 2>&1 && test_set_prereq ZSTD
 command -v xz >/dev/null 2>&1 && test_set_prereq XZ
 command -v bzip2 >/dev/null 2>&1 && test_set_prereq BZIP2
+command -v gzip >/dev/null 2>&1 && test_set_prereq GZIP
+command -v brotli >/dev/null 2>&1 && test_set_prereq BROTLI
 
 # --- config: User-Agent ----------------------------------------------
 test_expect_success 'User-Agent comes from ini [user]' '
@@ -310,6 +312,46 @@ test_expect_success 'a pending resume suppresses the conditional request' '
 	printf "%s" "{\"url\":\"$URL\",\"etag\":\"v1\"}" >out.bin.gp-meta &&
 	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && contains "200 OK" "$out" && cmp ref.bin out.bin
+'
+
+# --- --compress: decode transfer-encoded responses ------------------
+# With -z gp advertises zstd/br/gzip and inflates the body itself (no auto-gzip
+# from Go's transport). The server serves the pre-compressed file verbatim
+# under a Content-Encoding header; gp must reproduce the original plaintext.
+test_expect_success GZIP '-z inflates a gzip transfer encoding' '
+	echo "hello compress" >plain.txt && gzip -c plain.txt >body &&
+	export SERVE_FILE="$PWD/body" SERVE_ENCODE=gzip && serve http &&
+	gp -z -o out.txt "$URL" && test "$code" = 0 && cmp plain.txt out.txt
+'
+
+test_expect_success ZSTD '-z inflates a zstd transfer encoding' '
+	echo "hello compress" >plain.txt && zstd -q -c plain.txt >body &&
+	export SERVE_FILE="$PWD/body" SERVE_ENCODE=zstd && serve http &&
+	gp -z -o out.txt "$URL" && test "$code" = 0 && cmp plain.txt out.txt
+'
+
+test_expect_success BROTLI '-z inflates a br (brotli) transfer encoding' '
+	echo "hello compress" >plain.txt && brotli -c plain.txt >body &&
+	export SERVE_FILE="$PWD/body" SERVE_ENCODE=br && serve http &&
+	gp -z -o out.txt "$URL" && test "$code" = 0 && cmp plain.txt out.txt
+'
+
+# deflate is deliberately unsupported (ambiguous coding); a server that sends
+# it anyway must produce a clear error, never a silently corrupt file.
+test_expect_success '-z errors clearly on an unsupported deflate encoding' '
+	echo data >body &&
+	export SERVE_FILE="$PWD/body" SERVE_ENCODE=deflate && serve http &&
+	gp -z -o out.txt "$URL"; test "$code" != 0 && contains "deflate" "$out"
+'
+
+# Without -z the default stays identity: no Accept-Encoding is sent, so the
+# split path still engages on a ranged body (compression never interferes).
+test_expect_success '-z off keeps identity and still splits' '
+	export SERVE_SIZE=$((256 * 1024)) CHUNK_BYTES=$((64 * 1024)) && serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null && rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" = 4
 '
 
 # --- archive extraction ----------------------------------------------

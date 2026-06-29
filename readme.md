@@ -21,7 +21,7 @@ Global options (all commands):
   -q, --quic
     	use HTTP/3 over QUIC
   -z, --compress
-    	accept gzip transfer encoding (disables ranges/resume/304)
+    	accept gzip/zstd/br transfer encoding (disables ranges/resume/304)
   -r, --retries int
     	retries on 429/503; 0 disables
   -c, --chunk int

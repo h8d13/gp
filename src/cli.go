@@ -138,15 +138,17 @@ func newClient(p prefs) (*http.Client, func() error) {
 		ResponseHeaderTimeout: 30 * time.Second,
 		ForceAttemptHTTP2:     true, // a custom TLSClientConfig otherwise disables h2
 		TLSClientConfig:       tlsConfig(p),
-		// Default to identity bytes, never gzip. Go otherwise adds
-		// Accept-Encoding: gzip and inflates transparently, which is wrong for a
-		// downloader: the Content-Length then reports the compressed size (bad
-		// split math and progress), Apache's mod_deflate drops Accept-Ranges (no
-		// parallel split), and it rewrites the ETag ("abc" -> "abc-gzip") so a
-		// later conditional request never matches and the 304 fast-path degrades
-		// to a full refetch. Identity is also curl's default. --compress opts
-		// back in for the rare large-text-dump case (and so forfeits those).
-		DisableCompression: !p.Compress,
+		// Never let Go negotiate compression. Its transport only auto-handles
+		// gzip, and doing so is wrong for a downloader: the Content-Length then
+		// reports the compressed size (bad split math and progress), Apache's
+		// mod_deflate drops Accept-Ranges (no parallel split), and it rewrites
+		// the ETag ("abc" -> "abc-gzip") so a later conditional request never
+		// matches and the 304 fast-path degrades to a full refetch. Identity is
+		// also curl's default. --compress instead sets Accept-Encoding itself
+		// (see acceptEncoding) and inflates the body via decodeBody, which
+		// covers more codings than Go's built-in gzip and keeps this transport
+		// out of it.
+		DisableCompression: true,
 	}
 	return &http.Client{Transport: tr}, func() error { return nil }
 }
@@ -222,7 +224,7 @@ func Main() {
 	var useQuic bool
 	boolVar(&useQuic, true, false, "use HTTP/3 over QUIC", "q", "quic")
 	var compress bool
-	boolVar(&compress, true, false, "accept gzip transfer encoding (disables ranges/resume/304)", "z", "compress")
+	boolVar(&compress, true, false, "accept gzip/zstd/br transfer encoding (disables ranges/resume/304)", "z", "compress")
 	var ret int
 	intVar(&ret, true, -1, "retries on 429/503; 0 disables", "r", "retries")
 	var chk int
@@ -289,6 +291,11 @@ func Main() {
 	if p.UserAgent != "" {
 		req.Header.Set("User-Agent", p.UserAgent)
 	}
+	if p.Compress {
+		// Opt into transfer compression for the codings decodeBody handles.
+		// Forfeits ranges/resume/304 (the split case below also gates on this).
+		req.Header.Set("Accept-Encoding", acceptEncoding)
+	}
 
 	// Replay a prior run's validator as a conditional request, so an unchanged
 	// file comes back 304 and skips the transfer. Only when -o names a file
@@ -346,14 +353,23 @@ func Main() {
 	}
 
 	var n int64
+	// A compressed body has no useful length up front (Content-Length is the
+	// compressed size, the output is larger), so the bar runs indeterminate.
+	total := resp.ContentLength
+	if !isIdentity(resp.Header.Get("Content-Encoding")) {
+		total = 0
+	}
 	// One progress bar for the whole run: it shows [DL] while downloading,
 	// then reset()s to [XT] for extraction, reusing the same line.
-	prog := newProgress(resp.ContentLength, "DL", p.Progress)
+	prog := newProgress(total, "DL", p.Progress)
 	prog.run()
 	switch {
-	// Split only when it can pay off and offset-writes are possible; that
-	// path also owns the output file and handles resume.
-	case out != "" && p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp):
+	// Split only when it can pay off and offset-writes are possible; that path
+	// also owns the output file and handles resume. Never split a compressed
+	// transfer: byte ranges would address the encoded stream, not the file, so
+	// the reassembled offsets would be meaningless (--compress forces one
+	// stream, and a server compressing on its own drops Accept-Ranges anyway).
+	case !p.Compress && out != "" && p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
 		if !chunkSet {
 			p.ChunkBytes = int(splitSegment(resp.ContentLength, p.Parallel, int64(p.ChunkBytes)))
@@ -363,13 +379,24 @@ func Main() {
 		sc, closeSplit := newSplitClient(p)
 		defer closeSplit()
 		n, err = saveSplit(sc, resp, out, p, rp, prog)
-	case out != "":
-		n, err = saveStream(out, resp.Body, prog)
 	default:
-		// No -o: stream the body to stdout so a bare fetch is pipeable
-		// (gp URL | tar xz). All diagnostics go to stderr so stdout stays
-		// byte-clean for a redirect or pipe.
-		n, err = io.Copy(progWriter{os.Stdout, prog}, resp.Body)
+		// Single stream. Inflate any transfer compression on the fly; an
+		// identity body passes through, so the common path is unchanged. With
+		// -o the bytes go to the file; without it they stream to stdout so a
+		// bare fetch stays pipeable (gp URL | tar xz), diagnostics on stderr.
+		body, closeBody, derr := decodeBody(resp)
+		if derr != nil {
+			err = derr
+		} else {
+			if closeBody != nil {
+				defer closeBody()
+			}
+			if out != "" {
+				n, err = saveStream(out, body, prog)
+			} else {
+				n, err = io.Copy(progWriter{os.Stdout, prog}, body)
+			}
+		}
 	}
 	if err != nil {
 		prog.finish()

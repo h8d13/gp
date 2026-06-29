@@ -27,6 +27,9 @@
 #               path ending in "/" -- a directory-index listing for an index
 #               source to resolve a file from; the linked files are served by
 #               the normal body path.
+#   SERVE_ENCODE advertise this Content-Encoding (gzip/zstd/br) and serve the
+#               already-compressed SERVE_FILE verbatim, with no Accept-Ranges,
+#               to drive gp's --compress decode path.
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
@@ -39,6 +42,10 @@ mode = sys.argv[1]
 SIZE = int(os.environ.get("SERVE_SIZE", "0"))
 EXPECT = int(os.environ.get("EXPECT", "1"))
 ETAG = os.environ.get("SERVE_ETAG", "")
+# SERVE_ENCODE: advertise this Content-Encoding and serve the (already
+# compressed) SERVE_FILE bytes verbatim, so gp's --compress decode path can be
+# tested end to end. A compressed response carries no byte ranges.
+ENCODE = os.environ.get("SERVE_ENCODE", "")
 
 
 def pattern(n):
@@ -60,7 +67,7 @@ else:
     BODY = b"hi"
 # Advertise Accept-Ranges for any sized body (a pattern or a served file), so
 # gp's split path can engage on a real archive, not just the synthetic stream.
-RANGES = SIZE > 0 or bool(os.environ.get("SERVE_FILE"))
+RANGES = (SIZE > 0 or bool(os.environ.get("SERVE_FILE"))) and not ENCODE
 lock = threading.Lock()
 barrier = threading.Barrier(EXPECT) if EXPECT > 1 else None
 cur = mx = 0
@@ -162,6 +169,8 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         if RANGES:
             self.send_header("Accept-Ranges", "bytes")
+        if ENCODE:
+            self.send_header("Content-Encoding", ENCODE)
         if ETAG:
             self.send_header("ETag", ETAG)
         self.send_header("Content-Length", str(len(BODY)))

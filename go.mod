@@ -3,6 +3,7 @@ module github.com/h8d13/gp
 go 1.26.4
 
 require (
+	github.com/andybalholm/brotli v1.2.1
 	github.com/klauspost/compress v1.18.6
 	github.com/quic-go/quic-go v0.60.0
 	github.com/ulikunitz/xz v0.5.15
