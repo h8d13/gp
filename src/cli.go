@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -169,6 +168,8 @@ func Main() {
 	boolVar(&useQuic, false, "use HTTP/3 over QUIC, overrides config", "q", "quic")
 	var ret int
 	intVar(&ret, -1, "retries on 429/503, overrides config; 0 disables", "r", "retries")
+	var chk int
+	intVar(&chk, -1, "split/resume chunk size in bytes, overrides config", "c", "chunk")
 	var noProg bool
 	boolVar(&noProg, false, "disable the live download progress line", "no-progress")
 	var extract string
@@ -185,6 +186,9 @@ func Main() {
 	}
 	if ret >= 0 {
 		p.Retries = ret
+	}
+	if chk > 0 {
+		p.ChunkBytes = chk
 	}
 	if noProg {
 		p.Progress = false
@@ -251,24 +255,19 @@ func Main() {
 		fmt.Fprintln(os.Stderr, "save:", err)
 		os.Exit(1)
 	}
-	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "save:", err)
-		os.Exit(1)
-	}
-	defer f.Close()
 
 	var n int64
 	// One progress bar for the whole run: it shows [DL] while downloading,
 	// then reset()s to [XT] for extraction, reusing the same line.
 	prog := newProgress(resp.ContentLength, "DL", p.Progress)
 	prog.run()
-	// Split only when it can pay off and offset-writes are possible.
+	// Split only when it can pay off and offset-writes are possible; that
+	// path also owns the output file and handles resume.
 	if p.Parallel > 1 && resp.ContentLength >= int64(p.ParallelMin) && rangeable(resp) {
-		resp.Body.Close() // drop the probe stream; range requests refetch from 0
-		n, err = parallelDownload(client, resp.Request.URL.String(), p.UserAgent, f, resp.ContentLength, p.Parallel, rp, prog)
+		resp.Body.Close() // drop the probe stream; range requests refetch
+		n, err = saveSplit(client, resp, out, p, rp, prog)
 	} else {
-		n, err = io.Copy(progWriter{f, prog}, resp.Body)
+		n, err = saveStream(out, resp.Body, prog)
 	}
 	if err != nil {
 		prog.finish()

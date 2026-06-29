@@ -11,15 +11,21 @@
 #   EXPECT      hold every range request at a barrier until EXPECT of them
 #               coexist, turning "did gp open N connections" into a hard
 #               check (max concurrency) rather than a timing race.
+#   SERVE_ETAG  advertise this value as the ETag (a resume validator) on
+#               both the probe and every range reply, so gp persists a
+#               .gp-part manifest and a later run can resume.
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
-# concurrent requests) -- the shell reads these to assert.
+# concurrent requests), "ranges" (one "lo-hi" line per range request, so a
+# resume test can assert exactly which chunks were (re)fetched) -- the shell
+# reads these to assert.
 import http.server, ssl, sys, os, threading
 
 mode = sys.argv[1]
 SIZE = int(os.environ.get("SERVE_SIZE", "0"))
 EXPECT = int(os.environ.get("EXPECT", "1"))
+ETAG = os.environ.get("SERVE_ETAG", "")
 
 
 def pattern(n):
@@ -78,10 +84,14 @@ class H(http.server.BaseHTTPRequestHandler):
         rng = self.headers.get("Range")
         if rng:
             lo, hi = (int(v) for v in rng.replace("bytes=", "").split("-"))
+            with lock:
+                open("ranges", "a").write(f"{lo}-{hi}\n")
             if barrier:
                 barrier.wait()  # prove all EXPECT range requests coexist
             self.send_response(206)
             self.send_header("Accept-Ranges", "bytes")
+            if ETAG:
+                self.send_header("ETag", ETAG)
             self.send_header("Content-Range", f"bytes {lo}-{hi}/{len(BODY)}")
             self.send_header("Content-Length", str(hi - lo + 1))
             self.end_headers()
@@ -90,6 +100,8 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         if SIZE:
             self.send_header("Accept-Ranges", "bytes")
+        if ETAG:
+            self.send_header("ETag", ETAG)
         self.send_header("Content-Length", str(len(BODY)))
         self.end_headers()
         self.wfile.write(BODY)

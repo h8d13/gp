@@ -165,9 +165,11 @@ test_expect_success TLS 'ALLOW_INSECURE=1 (.env) accepts self-signed' '
 
 # --- parallel range download -----------------------------------------
 # serve.py: SERVE_SIZE advertises Accept-Ranges; EXPECT barriers N coexisting
-# range requests; it records peak concurrency in the "maxconc" file.
+# range requests; it records peak concurrency in the "maxconc" file. The new
+# download path splits by CHUNK_BYTES, so to open N connections the body must
+# be at least N chunks: chunk = size/N forces exactly N concurrent ranges.
 test_expect_success 'parallel split reassembles and opens N connections' '
-	export SERVE_SIZE=$((256 * 1024)) EXPECT=4 && serve http &&
+	export SERVE_SIZE=$((256 * 1024)) EXPECT=4 CHUNK_BYTES=$((64 * 1024)) && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" && test "$code" = 0 &&
 	cmp ref.bin out.bin && test "$(cat maxconc)" -ge 4
@@ -183,6 +185,55 @@ test_expect_success 'PARALLEL=1 disables splitting' '
 	export SERVE_SIZE=$((256 * 1024)) && serve http &&
 	export PARALLEL=1 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && test "$(cat maxconc)" = 1
+'
+
+# --- chunked / resumable download ------------------------------------
+# serve.py: SERVE_ETAG advertises a validator so gp writes a .gp-part
+# manifest; the "ranges" file records every byte range it served, so a test
+# can assert exactly which chunks were (re)fetched. A 256 KiB body at a
+# 64 KiB chunk plans 4 chunks: [0-65535] [65536-131071] [131072-196607]
+# [196608-262143].
+
+test_expect_success '-c chunk size splits into ceil(size/chunk) ranges' '
+	export SERVE_SIZE=$((200 * 1024)) SERVE_ETAG=v1 && serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -c $((64 * 1024)) -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" = 4 &&
+	test ! -e out.bin.gp-part   # manifest dropped once complete
+'
+
+# A killed transfer leaves a manifest marking the chunks already on disk;
+# the next run must refetch ONLY the gaps, trusting the bytes it kept.
+test_expect_success 'resume refetches only the missing chunks' '
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 CHUNK_BYTES=$((64 * 1024)) &&
+	serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	cp ref.bin out.bin &&   # bytes for the done chunks are already correct
+	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,false,true,false]}" >out.bin.gp-part &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	printf "%s\n" "65536-131071" "196608-262143" | sort >expect &&
+	sort -u ranges >got && diff expect got &&
+	test ! -e out.bin.gp-part
+'
+
+# A manifest whose validator no longer matches the remote is stale: gp must
+# discard the on-disk bytes and refetch every chunk, not stitch onto a file
+# that changed underneath it.
+test_expect_success 'resume restarts when the validator changed' '
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v2 CHUNK_BYTES=$((64 * 1024)) &&
+	serve http &&
+	"$GP" -o ref.bin "$URL" >/dev/null &&
+	head -c 262144 /dev/zero >out.bin &&   # stale garbage from a changed remote
+	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,true,true,true]}" >out.bin.gp-part &&
+	rm -f ranges &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	test "$code" = 0 && cmp ref.bin out.bin &&
+	test "$(sort -u ranges | wc -l | tr -d " ")" = 4 &&
+	test ! -e out.bin.gp-part
 '
 
 # --- archive extraction ----------------------------------------------
