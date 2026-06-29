@@ -95,5 +95,28 @@ dest = /opt/t
 '
 ok 'a source with no url/index/repo is rejected' 'test "$code" != 0 && has "url, index, or repo"'
 
+# --- gp rm: forget a source's lock entry, delete nothing (no network) ---
+rm -rf xdg && mkdir -p xdg/gp
+printf '[T]\nurl = http://example.invalid/f\ndest = ~/opt/t\n' >xdg/gp/sources.ini
+printf '[installed]\nT = v9\n' >xdg/gp/sources.lock
+export XDG_CONFIG_HOME="$PWD/xdg"
+
+out=$("$GP" rm T 2>&1)
+code=$?
+ok 'rm drops the lock entry' 'test "$code" = 0 && ! grep -q "T = v9" xdg/gp/sources.lock'
+ok 'rm prints the dest with a leading ~ (not expanded)' 'has "~/opt/t" && ! has "$HOME/opt/t"'
+
+out=$("$GP" rm NOPE 2>&1)
+code=$?
+ok 'rm errors on an unknown source' 'test "$code" != 0 && has "no source named"'
+
+out=$("$GP" rm 2>&1)
+code=$?
+ok 'rm with no name errors' 'test "$code" != 0'
+
+out=$("$GP" up rm T 2>&1)
+code=$?
+ok 'up rm is rejected (rm is its own verb)' 'test "$code" != 0 && has "unknown subcommand"'
+
 echo "# passed $((count - failed)) of $count"
 [ "$failed" = 0 ]

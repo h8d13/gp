@@ -21,6 +21,8 @@ Commands:
     	install/update all tools from sources.ini
   gp up check
     	validate sources.ini and exit (no downloads)
+  gp rm NAME...
+    	forget a source's recorded version (prints its dest; deletes no files)
 
 Global options (all commands):
   -p, --parallel int

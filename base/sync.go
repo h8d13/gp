@@ -122,11 +122,27 @@ func expandHome(p string) string {
 	return p
 }
 
-// upMain is the `gp up` entry point: it processes every source in sources.ini.
-// It exits non-zero if any source fails, but still attempts the rest so one bad
-// entry does not block the others. With checkOnly it stops after loadSources
-// has parsed and validated every section, touching no network and installing
-// nothing: a config lint for `gp up check`.
+// contractHome is expandHome's inverse for display: a path under the home dir
+// is shown with a leading ~ (as the user wrote it in sources.ini), anything
+// else unchanged.
+func contractHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// upMain is the `gp up` entry point: it installs/updates every source in
+// sources.ini. With checkOnly it stops after loadSources has parsed and
+// validated every section, touching no network and installing nothing: the
+// config lint behind `gp up check`.
 func upMain(p prefs, checkOnly bool) {
 	srcs, err := loadSources(sourcesPath())
 	if err != nil {
@@ -169,6 +185,56 @@ func upMain(p prefs, checkOnly bool) {
 	}
 }
 
+// rmMain implements `gp rm <name>...`: it forgets each named source (drops the
+// source's lock entry so a later `up` reinstalls it fresh) and prints where its
+// files live. It deletes nothing on purpose, since a dest can be shared with
+// other sources or unrelated files (e.g. ~/.local/bin); removal is left to the
+// user. Names must exist in sources.ini, which is where dest is read from.
+func rmMain(names []string) {
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stderr, "rm: need at least one source name")
+		os.Exit(2)
+	}
+	srcs, err := loadSources(sourcesPath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rm:", err)
+		os.Exit(1)
+	}
+	byName := make(map[string]source, len(srcs))
+	for _, s := range srcs {
+		byName[s.name] = s
+	}
+	lock := loadConfig(lockPath())
+	installed := lock["installed"]
+	if installed == nil {
+		installed = map[string]string{}
+	}
+
+	failed, changed := false, false
+	for _, name := range names {
+		s, ok := byName[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "rm: no source named %q in %s\n", name, sourcesPath())
+			failed = true
+			continue
+		}
+		if _, tracked := installed[name]; tracked {
+			delete(installed, name)
+			changed = true
+		}
+		fmt.Printf("%s: dropped from lock; delete its files yourself: %s\n", name, contractHome(s.dest))
+	}
+	if changed {
+		if err := saveLock(lockPath(), installed); err != nil {
+			fmt.Fprintln(os.Stderr, "rm: write lock:", err)
+			failed = true
+		}
+	}
+	if failed {
+		os.Exit(1)
+	}
+}
+
 // syncOne resolves s to its latest release and installs it when the tag differs
 // from have (the recorded installed tag) or the destination is missing. It
 // returns the newly installed tag, or "" when nothing changed.
@@ -195,9 +261,14 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	if err != nil {
 		return "", err
 	}
-	if have == "" {
+	switch {
+	case have == "":
 		fmt.Printf("%s: installing %s (%s)\n", s.name, rel.TagName, asset.Name)
-	} else {
+	case have == rel.TagName:
+		// Same tag, but the up-to-date check above fell through, so dest was
+		// missing: this is a reinstall, not an update.
+		fmt.Printf("%s: reinstalling %s (%s)\n", s.name, rel.TagName, asset.Name)
+	default:
 		fmt.Printf("%s: %s -> %s (%s)\n", s.name, have, rel.TagName, asset.Name)
 	}
 
@@ -243,9 +314,13 @@ func installFile(client *http.Client, s source, name, fileURL, have string, p pr
 		fmt.Printf("%s: up to date\n", s.name)
 		return "", nil
 	}
-	if have == "" {
+	switch {
+	case have == "":
 		fmt.Printf("%s: installing %s\n", s.name, name)
-	} else {
+	case validator != "" && validator == have:
+		// Validator unchanged but dest was missing: a reinstall, not an update.
+		fmt.Printf("%s: reinstalling %s\n", s.name, name)
+	default:
 		fmt.Printf("%s: updating %s\n", s.name, name)
 	}
 	if err := install(client, asset{Name: name, URL: fileURL}, s, p, rp); err != nil {
@@ -289,49 +364,67 @@ func urlBase(rawURL string) string {
 // into the directory; anything else (AppImage, .deb, a bare binary) is saved as
 // a file in it. Extraction fires when the name carries a known archive
 // extension, or when the source sets extract=true (for archive URLs that end in
-// no usable name, e.g. GitHub's /tarball API). The archive is staged in a temp
-// file and removed afterwards, mirroring the main download path.
+// no usable name, e.g. GitHub's /tarball API). An archive is staged in a temp
+// file and removed afterwards. One progress bar spans the whole install,
+// relabeling [DL] -> [XT] in place; verification happens in between but is too
+// fast for its own phase, so it leaves a persistent [VF✓] marker on the bar.
 func install(client *http.Client, a asset, s source, p prefs, rp retryPolicy) error {
-	if s.extract || isTarball(a.Name) {
+	// Stage an archive in a temp file (verified before it can reach s.dest); a
+	// plain file downloads straight to its final path under s.dest.
+	archive := s.extract || isTarball(a.Name)
+	var fp string
+	if archive {
 		tmp, err := os.CreateTemp("", "gp-up-*")
 		if err != nil {
 			return err
 		}
 		tmp.Close()
 		defer os.Remove(tmp.Name())
+		fp = tmp.Name()
+	} else {
+		if err := os.MkdirAll(s.dest, 0o755); err != nil {
+			return err
+		}
+		fp = filepath.Join(s.dest, destName(s, a.Name))
+	}
 
-		if _, err := fetchToFile(client, a.URL, tmp.Name(), p, rp, "DL"); err != nil {
-			return err
+	prog := newProgress(0, "DL", p.Progress)
+	prog.run()
+
+	if _, err := fetchToFile(client, a.URL, fp, p, rp, prog); err != nil {
+		prog.finish()
+		if !archive {
+			os.Remove(fp) // no half-written file left in dest
 		}
-		// Verify the staged archive before unpacking it: a bad checksum must
-		// never reach s.dest.
-		if err := verifyChecksum(client, s, a, tmp.Name(), p, rp); err != nil {
-			return err
+		return err
+	}
+	src, err := verifyChecksum(client, s, a, fp, p, rp)
+	if err != nil {
+		prog.finish()
+		os.Remove(fp) // never leave an unverified file staged or in dest
+		return err
+	}
+	if src != "" {
+		prog.setNote("[VF✓]") // a lasting verify mark on the bar
+	}
+
+	if archive {
+		var size int64
+		if fi, e := os.Stat(fp); e == nil {
+			size = fi.Size()
 		}
-		if fi, e := os.Stat(tmp.Name()); e == nil {
-			prog := newProgress(fi.Size(), "XT", p.Progress)
-			prog.run()
-			_, err = extractTarGz(tmp.Name(), s.dest, prog)
+		prog.reset(size, "XT")
+		if _, err := extractTarGz(fp, s.dest, prog); err != nil {
 			prog.finish()
+			return err
 		}
-		return err
 	}
-
-	// Non-archive asset: drop it into dest under its own name, then mark it
-	// executable when it looks runnable (a binary or a script), so a tool
-	// fetched this way works without a manual chmod.
-	if err := os.MkdirAll(s.dest, 0o755); err != nil {
-		return err
+	prog.finish()
+	if !archive {
+		// Mark a binary or "#!" script executable so it runs without a chmod.
+		return makeExecutableIfRunnable(fp)
 	}
-	out := filepath.Join(s.dest, destName(s, a.Name))
-	if _, err := fetchToFile(client, a.URL, out, p, rp, "DL"); err != nil {
-		return err
-	}
-	if err := verifyChecksum(client, s, a, out, p, rp); err != nil {
-		os.Remove(out) // don't leave an unverified binary in dest
-		return err
-	}
-	return makeExecutableIfRunnable(out)
+	return nil
 }
 
 // destName is the filename a single-file asset is saved under: the source's
@@ -366,11 +459,12 @@ func makeExecutableIfRunnable(fp string) error {
 	return os.Chmod(fp, fi.Mode()|0o111)
 }
 
-// fetchToFile streams url to out with a progress bar, following redirects (the
-// CDN hop browser_download_url makes). It splits into a parallel/resumable
-// download when prefs enable it and the (redirected) target advertises byte
-// ranges; otherwise it falls back to a single stream.
-func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, label string) (int64, error) {
+// fetchToFile streams url to out, following redirects (the CDN hop
+// browser_download_url makes). It splits into a parallel/resumable download when
+// prefs enable it and the (redirected) target advertises byte ranges; otherwise
+// it falls back to a single stream. It reports into the caller's prog (relabeled
+// to [DL]); the caller owns the bar's run/finish so it can span later phases.
+func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, prog *progress) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -387,8 +481,7 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return 0, err
 	}
-	prog := newProgress(resp.ContentLength, label, p.Progress)
-	prog.run()
+	prog.reset(resp.ContentLength, "DL")
 	var n int64
 	if p.splittable(resp) {
 		resp.Body.Close() // drop the probe stream; range requests refetch
@@ -398,7 +491,6 @@ func fetchToFile(client *http.Client, url, out string, p prefs, rp retryPolicy, 
 	} else {
 		n, err = saveStream(out, resp.Body, prog)
 	}
-	prog.finish()
 	return n, err
 }
 

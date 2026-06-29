@@ -593,7 +593,8 @@ ext = tar.gz
 dest = $PWD/inst
 " &&
 	gp up && test "$code" = 0 && rm -rf inst &&
-	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = back
+	gp up && test "$code" = 0 && test "$(cat inst/f.txt)" = back &&
+	contains "reinstalling v1.0.0" "$out"   # same tag, dest was gone: not "v1 -> v1"
 '
 
 test_expect_success 'up saves a non-archive asset as a file in dest' '

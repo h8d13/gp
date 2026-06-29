@@ -17,34 +17,38 @@ import (
 )
 
 // verifyChecksum hashes the file at fp and checks it against the expected
-// sha256, resolved in precedence order: the source's pinned digest, else the
-// one looked up by asset name in its sha256-url checksums file, else the digest
-// the forge published for the asset (GitHub ships one, so its releases verify
-// with no config). It is a no-op when none of those exist. A mismatch is a hard
-// error.
-func verifyChecksum(client *http.Client, s source, a asset, fp string, p prefs, rp retryPolicy) error {
-	want := s.sha256
-	if want == "" && s.sumURL != "" {
+// sha256, taking the first source available in precedence order: the source's
+// pinned digest, then the one looked up by asset name in its sha256-url
+// checksums file, then the digest the forge published for the asset (GitHub
+// ships one, so its releases verify with no config). It returns the source that
+// vouched ("" when none exist, i.e. nothing was verified), so the caller knows
+// whether to mark the bar. Hashing is near instant even for a large asset, so
+// it gets no phase of its own (it would only flash); the caller leaves a lasting
+// [VF✓] marker on the bar instead. A mismatch is a hard error.
+func verifyChecksum(client *http.Client, s source, a asset, fp string, p prefs, rp retryPolicy) (string, error) {
+	var want, src string
+	switch {
+	case s.sha256 != "":
+		want, src = s.sha256, "pinned sha256"
+	case s.sumURL != "":
 		got, err := fetchChecksum(client, s.sumURL, a.Name, p.UserAgent, rp)
 		if err != nil {
-			return err
+			return "", err
 		}
-		want = got
-	}
-	if want == "" {
-		want = a.Digest // forge-published per-asset digest, if any
-	}
-	if want == "" {
-		return nil
+		want, src = got, "sha256-url"
+	case a.Digest != "":
+		want, src = a.Digest, "release digest"
+	default:
+		return "", nil // nothing to verify against
 	}
 	sum, err := sha256File(fp)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !strings.EqualFold(sum, want) {
-		return fmt.Errorf("checksum mismatch for %s: want %s, got %s", a.Name, want, sum)
+		return "", fmt.Errorf("checksum mismatch for %s: want %s, got %s", a.Name, want, sum)
 	}
-	return nil
+	return src, nil
 }
 
 // sha256File returns the lowercase hex sha256 of the file at fp, streaming it so

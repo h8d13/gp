@@ -76,6 +76,7 @@ func usage() {
 	fmt.Fprintf(out, "\nCommands:\n")
 	fmt.Fprintf(out, "  %s up\n    \tinstall/update all tools from sources.ini\n", name)
 	fmt.Fprintf(out, "  %s up check\n    \tvalidate sources.ini and exit (no downloads)\n", name)
+	fmt.Fprintf(out, "  %s rm NAME...\n    \tforget a source's recorded version (prints its dest; deletes no files)\n", name)
 
 	fmt.Fprintf(out, "\nGlobal options (all commands):\n")
 	printFlags(out, true)
@@ -280,13 +281,20 @@ func Main() {
 		p.Progress = false
 	}
 
-	// The `up` subcommand walks all of sources.ini using the prefs resolved
-	// above, so the download flags (-p, -q, -r, -c, -n) shape its fetches too.
-	// A bare `up` installs; `up check` only parses and validates sources.ini
-	// and exits (no network), for a quick config lint. Other trailing args are
-	// ignored.
+	// `up` installs/updates every source (the download flags -p/-q/-r/-c/-n
+	// shape its fetches too); `up check` lints sources.ini without fetching.
+	// `rm NAME...` forgets a source's recorded version. An unknown `up X` is an
+	// error rather than a silent full install (e.g. a stray `up rm`).
 	if len(posArgs) > 0 && posArgs[0] == "up" {
-		upMain(p, len(posArgs) > 1 && posArgs[1] == "check")
+		if len(posArgs) > 1 && posArgs[1] != "check" {
+			fmt.Fprintf(os.Stderr, "gp up: unknown subcommand %q (use `gp rm NAME` to uninstall)\n", posArgs[1])
+			os.Exit(2)
+		}
+		upMain(p, len(posArgs) > 1)
+		return
+	}
+	if len(posArgs) > 0 && posArgs[0] == "rm" {
+		rmMain(posArgs[1:])
 		return
 	}
 
