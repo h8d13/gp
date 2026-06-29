@@ -8,8 +8,9 @@
 ## Usage
 
 ```
-Usage: gp [flags] [url]   (url defaults to example.com)
-
+Usage: gp [flags] URL [FILE]
+       gp up [NAME...]   install/update tools from sources.ini
+  FILE, if given, is where to save (default: the URL's basename)
   -o, --output string
     	save response body to file
   -p, --parallel int
@@ -20,6 +21,10 @@ Usage: gp [flags] [url]   (url defaults to example.com)
     	retries on 429/503; 0 disables
   -c, --chunk int
     	split/resume chunk size in bytes
+  --no-progress
+    	disable the live download progress line
+  -x, --extract string
+    	unpack the downloaded tar/tar.gz into this dir
 ```
 
 ## Configuration

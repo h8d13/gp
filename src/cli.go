@@ -171,13 +171,13 @@ func Main() {
 	var out string
 	strVar(&out, "", "save response body to file", "o", "output")
 	var par int
-	intVar(&par, -1, "parallel connections, overrides config; 1 disables (needs -o)", "p", "parallel")
+	intVar(&par, -1, "parallel connections; 1 disables (needs -o)", "p", "parallel")
 	var useQuic bool
-	boolVar(&useQuic, false, "use HTTP/3 over QUIC, overrides config", "q", "quic")
+	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
 	var ret int
-	intVar(&ret, -1, "retries on 429/503, overrides config; 0 disables", "r", "retries")
+	intVar(&ret, -1, "retries on 429/503; 0 disables", "r", "retries")
 	var chk int
-	intVar(&chk, -1, "split/resume chunk size in bytes, overrides config", "c", "chunk")
+	intVar(&chk, -1, "split/resume chunk size in bytes", "c", "chunk")
 	var noProg bool
 	boolVar(&noProg, false, "disable the live download progress line", "no-progress")
 	var extract string
