@@ -9,7 +9,6 @@
 
 ```
 Usage: gp [flags] URL [FILE]
-       gp up [NAME...]   install/update tools from sources.ini
   FILE, if given, is where to save (default: the URL's basename)
   -o, --output string
     	save response body to file
@@ -25,6 +24,10 @@ Usage: gp [flags] URL [FILE]
     	disable the live download progress line
   -x, --extract string
     	unpack the downloaded tar/tar.gz into this dir
+
+Commands:
+  gp up [NAME...]
+    	install/update tools from sources.ini
 ```
 
 ## Configuration

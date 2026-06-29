@@ -68,7 +68,6 @@ func usage() {
 	out := flag.CommandLine.Output()
 	name := filepath.Base(os.Args[0])
 	fmt.Fprintf(out, "Usage: %s [flags] URL [FILE]\n", name)
-	fmt.Fprintf(out, "       %s up [NAME...]   install/update tools from sources.ini\n", name)
 	fmt.Fprintf(out, "  FILE, if given, is where to save (default: the URL's basename)\n")
 	for _, g := range flagGroups {
 		var spell []string
@@ -85,6 +84,10 @@ func usage() {
 		}
 		fmt.Fprintf(out, "  %s\n    \t%s\n", line, g.usage)
 	}
+	// Subcommands get their own block so they don't read as flags of the
+	// default URL form above.
+	fmt.Fprintf(out, "\nCommands:\n")
+	fmt.Fprintf(out, "  %s up [NAME...]\n    \tinstall/update tools from sources.ini\n", name)
 }
 
 // tlsConfig is the single place TLS policy lives; nil means stdlib
