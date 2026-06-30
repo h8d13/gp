@@ -1033,6 +1033,22 @@ dest = $PWD/inst
 	gp up check; test "$code" != 0 && contains "unresolved" "$out"
 '
 
+# Sources are processed in file order (top to bottom), not alphabetical: ZEBRA
+# is written first, so it resolves first even though it sorts last.
+test_expect_success 'up processes sources in file order, not alphabetical' '
+	echo x >f && export SERVE_FILE="$PWD/f" && serve http &&
+	write_sources "[ZEBRA]
+url = $URL/z
+dest = $PWD/z
+
+[ALPHA]
+url = $URL/a
+dest = $PWD/a
+" &&
+	gp up check && test "$code" = 0 &&
+	test "$(printf "%s" "$out" | head -1)" = "ZEBRA: ok, z"
+'
+
 # --- up: tag sources (latest git tag's source archive) ---------------
 # serve.py SERVE_TAGS mocks the tags API (newest first); the archive download
 # (.../archive/...) is the normal body. tag = true resolves the newest tag.

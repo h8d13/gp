@@ -5,8 +5,14 @@
 > Inspired by some of [curl](https://github.com/curl/curl).
 > Also doubles as a **sources and extract** manager. **HTTP Only**.
 
-`-x` extraction and `--compress` shell out to system decompressors
-(`xz zstd gzip bzip2 brotli`; see [deps](./deps)) rather than vendoring Go ports.
+## Setup
+
+```shell
+pacman -S --needed xz zstd gzip bzip2 brotli go
+git clone --depth 1 https://github.com/h8d13/gp
+cd gp
+go build
+```
 
 See [config](./config.ini) and [sources](./sources.ini) for examples.
 

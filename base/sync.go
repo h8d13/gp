@@ -1,10 +1,10 @@
 // The `up` subcommand: keep locally-installed tools current. A sources.ini next
-// to config.ini lists [NAME] sections; each resolves to a downloadable file in
-// one of three ways (a forge release, a bare url, or a directory index; see the
-// source struct), and `gp up` installs it only when the upstream version
-// changed. The version is the release tag for a forge, else the HTTP validator
-// (ETag/Last-Modified). A lockfile records what is installed, so an unchanged
-// upstream is a no-op and no per-tool version parsing is needed.
+// to config.ini lists [NAME] sections; each resolves to a downloadable file one
+// of several ways (a forge release, bare url, directory index, generic package,
+// or git-tag archive; see the source struct), and `gp up` installs it only when
+// the upstream version changed. The version is the release tag / package version
+// / git tag for an API source, else the HTTP validator (ETag/Last-Modified). A
+// lockfile records what is installed, so an unchanged upstream is a no-op.
 package base
 
 import (
@@ -20,9 +20,9 @@ import (
 	"strings"
 )
 
-// source is one [NAME] section of sources.ini. A source is either a forge
-// release (repo + match/ext on a forge) or a bare url (a direct file link);
-// url, when set, takes over and the forge fields are ignored.
+// source is one [NAME] section of sources.ini. Its type is set by exactly one
+// of url / index / package / repo (resolved in that precedence; see
+// loadSources), and the other type fields are then ignored.
 type source struct {
 	name    string   // the section name, e.g. CODIUM
 	url     string   // direct file URL; when set this is a bare-url source
@@ -46,22 +46,18 @@ type source struct {
 func sourcesPath() string { return filepath.Join(filepath.Dir(configPath()), "sources.ini") }
 func lockPath() string    { return filepath.Join(filepath.Dir(configPath()), "sources.lock") }
 
-// loadSources parses sources.ini into sources sorted by name (deterministic
-// output and a stable "all" order). Each section needs repo and dest; ext and
-// match are optional (no ext means match by substring only).
+// loadSources parses sources.ini into sources in file order (top to bottom), so
+// `gp up` installs them in the order you wrote and you can sequence by priority
+// or dependency. Each section needs a source type and dest; ext and match are
+// optional (no ext means match by substring only).
 func loadSources(path string) ([]source, error) {
-	cfg := loadConfig(path)
+	cfg, order := loadConfig(path)
 	if len(cfg) == 0 {
 		return nil, fmt.Errorf("no sources in %s", path)
 	}
-	var names []string
-	for name := range cfg {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 
 	var srcs []source
-	for _, name := range names {
+	for _, name := range order {
 		sec := cfg[name]
 		s := source{
 			name:   name,
@@ -195,7 +191,7 @@ func upMain(p prefs, checkOnly bool) {
 		return
 	}
 
-	lock := loadConfig(lockPath()) // [installed] NAME = tag
+	lock, _ := loadConfig(lockPath()) // [installed] NAME = tag
 	installed := lock["installed"]
 	if installed == nil {
 		installed = map[string]string{}
@@ -245,7 +241,7 @@ func rmMain(names []string) {
 	for _, s := range srcs {
 		byName[s.name] = s
 	}
-	lock := loadConfig(lockPath())
+	lock, _ := loadConfig(lockPath())
 	installed := lock["installed"]
 	if installed == nil {
 		installed = map[string]string{}
