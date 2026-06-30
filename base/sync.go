@@ -37,6 +37,8 @@ type source struct {
 	extract bool     // force tar extraction even when the name lacks an archive ext
 	sha256  string   // pinned sha256 hex; the asset must hash to this
 	sumURL  string   // URL of a checksums file to look the asset's sha256 up in
+	pkg     string   // owner/name of a Forgejo/Gitea generic package (host sets the instance)
+	tag     string   // with repo: install a git tag's source archive (true=latest, else pinned)
 }
 
 // sourcesPath and lockPath live beside config.ini so all gp state is in one
@@ -73,6 +75,8 @@ func loadSources(path string) ([]source, error) {
 			dest:   expandHome(sec["dest"]),
 			sha256: strings.ToLower(sec["sha256"]),
 			sumURL: sec["sha256-url"],
+			pkg:    sec["package"],
+			tag:    sec["tag"],
 		}
 		if f := strings.Fields(sec["match"]); len(f) > 0 {
 			s.match = f
@@ -90,21 +94,42 @@ func loadSources(path string) ([]source, error) {
 		if s.sha256 != "" && !isHex64(s.sha256) {
 			return nil, fmt.Errorf("[%s]: sha256 must be 64 hex chars", name)
 		}
+		if s.tag != "" && s.repo == "" {
+			return nil, fmt.Errorf("[%s]: tag needs repo (it installs that repo's tag archive)", name)
+		}
 		// Resolve the source type, in precedence order: a bare url is the file
-		// itself; an index is a listing to pick one file from; otherwise it is
-		// a forge release. Each later field is ignored once an earlier one wins.
+		// itself; an index is a listing to pick one file from; a package is a
+		// Forgejo/Gitea generic-registry entry; otherwise it is a forge release.
+		// Each later field is ignored once an earlier one wins.
 		switch {
 		case s.url != "":
 		case s.index != "":
 			if len(s.match) == 0 && s.ext == "" {
 				return nil, fmt.Errorf("[%s]: index needs match or ext to pick a file", name)
 			}
+		case s.pkg != "":
+			if _, _, ok := splitOwnerName(s.pkg); !ok {
+				return nil, fmt.Errorf("[%s]: package must be owner/name", name)
+			}
+			if s.host == "" {
+				return nil, fmt.Errorf("[%s]: package needs host (the Forgejo/Gitea instance, e.g. codeberg.org)", name)
+			}
+			if len(s.match) == 0 && s.ext == "" {
+				return nil, fmt.Errorf("[%s]: package needs match or ext to pick a file", name)
+			}
 		case s.repo != "":
-			if _, err := forgeFor(s.forge); err != nil {
+			f, err := forgeFor(s.forge)
+			if err != nil {
 				return nil, fmt.Errorf("[%s]: %w", name, err)
 			}
+			if s.tag != "" && f.archiveURL == nil {
+				return nil, fmt.Errorf("[%s]: forge %q has no tag-archive support", name, f.name)
+			}
+			if tagIsLatest(s.tag) && f.tagsURL == nil {
+				return nil, fmt.Errorf("[%s]: forge %q has no ordered tag list, so tag = true can't find the newest; use a literal tag (tag = <name>, e.g. tag = latest) or a release source", name, f.name)
+			}
 		default:
-			return nil, fmt.Errorf("[%s]: url, index, or repo is required", name)
+			return nil, fmt.Errorf("[%s]: url, index, package, or repo is required", name)
 		}
 		srcs = append(srcs, s)
 	}
@@ -140,9 +165,10 @@ func contractHome(p string) string {
 }
 
 // upMain is the `gp up` entry point: it installs/updates every source in
-// sources.ini. With checkOnly it stops after loadSources has parsed and
-// validated every section, touching no network and installing nothing: the
-// config lint behind `gp up check`.
+// sources.ini. With checkOnly it parses the config, then probes each source over
+// the network (resolve the latest version, confirm match/ext pick one asset)
+// without downloading: the `gp up check` lint. It exits non-zero if any source
+// fails to parse or resolve.
 func upMain(p prefs, checkOnly bool) {
 	srcs, err := loadSources(sourcesPath())
 	if err != nil {
@@ -150,7 +176,22 @@ func upMain(p prefs, checkOnly bool) {
 		os.Exit(1)
 	}
 	if checkOnly {
-		fmt.Printf("%s: %d sources OK\n", sourcesPath(), len(srcs))
+		client, closeClient := newClient(p)
+		defer closeClient()
+		rp := p.retry()
+		failed := false
+		for _, s := range srcs {
+			desc, err := probeOne(client, s, p, rp)
+			if err != nil {
+				fmt.Printf("%s: unresolved (%v)\n", s.name, err)
+				failed = true
+				continue
+			}
+			fmt.Printf("%s: ok, %s\n", s.name, desc)
+		}
+		if failed {
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -235,15 +276,22 @@ func rmMain(names []string) {
 	}
 }
 
-// syncOne resolves s to its latest release and installs it when the tag differs
+// syncOne resolves s to its latest version and installs it when the tag differs
 // from have (the recorded installed tag) or the destination is missing. It
-// returns the newly installed tag, or "" when nothing changed.
+// returns the newly installed tag, or "" when nothing changed. url/index/package
+// sources have their own resolvers; the fallthrough is a forge release.
 func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
 	if s.url != "" {
 		return syncURL(client, s, have, p, rp)
 	}
 	if s.index != "" {
 		return syncIndex(client, s, have, p, rp)
+	}
+	if s.pkg != "" {
+		return syncPackage(client, s, have, p, rp)
+	}
+	if s.tag != "" {
+		return syncTag(client, s, have, p, rp)
 	}
 	f, err := forgeFor(s.forge) // already validated in loadSources
 	if err != nil {
@@ -253,6 +301,65 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 	if err != nil {
 		return "", err
 	}
+	return installRelease(client, s, rel, have, p, rp)
+}
+
+// syncTag handles a `repo` source with `tag` set: it installs the source archive
+// of a git tag (a tarball, auto-extracted). tag = true (or latest) resolves the
+// newest tag via the forge's tags API, so it auto-updates; any other value pins
+// that exact tag. The tag is the lock version. Only forges with archive support
+// (gitlab, gitea/forgejo) reach here; loadSources rejects the rest.
+func syncTag(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
+	f, err := forgeFor(s.forge)
+	if err != nil {
+		return "", err
+	}
+	host := s.host
+	if host == "" {
+		host = f.defaultHost
+	}
+	base := forgeBase(host)
+	if tagIsLatest(s.tag) {
+		// tag = true: resolve the newest tag. Its name is the version, so a new
+		// tag reads as an update (v1 -> v2).
+		tag, err := fetchLatestTag(client, f, host, s.repo, p.UserAgent, rp)
+		if err != nil {
+			return "", err
+		}
+		dl := f.archiveURL(base, s.repo, tag)
+		rel := release{TagName: tag, Assets: []asset{{Name: urlBase(dl), URL: dl}}}
+		return installRelease(client, s, rel, have, p, rp)
+	}
+	// A literal tag: a fixed version, or a rolling tag (latest/nightly) that is
+	// force-moved. Version by the archive's HTTP validator like a bare url, so a
+	// fixed tag is a no-op and a moved rolling tag is refetched when its bytes
+	// change -- the tag name alone could not tell those apart.
+	dl := f.archiveURL(base, s.repo, s.tag)
+	return installFile(client, s, destName(s, urlBase(dl)), dl, have, p, rp)
+}
+
+// tagIsLatest reports whether `tag` asks gp to resolve the newest tag via the
+// API. Only the literal true does; everything else (including "latest") is a
+// real tag name, since rolling "latest"/"nightly" tags are common.
+func tagIsLatest(v string) bool { return v == "true" }
+
+// syncPackage handles a generic-package source: resolve the newest version on
+// the Forgejo/Gitea instance named by host (required), then install like a
+// release. forge plays no part: the generic-registry API is identical on every
+// instance, so host alone identifies it.
+func syncPackage(client *http.Client, s source, have string, p prefs, rp retryPolicy) (string, error) {
+	owner, name, _ := splitOwnerName(s.pkg) // validated in loadSources
+	rel, err := fetchLatestPackage(client, s.host, owner, name, p.UserAgent, rp)
+	if err != nil {
+		return "", err
+	}
+	return installRelease(client, s, rel, have, p, rp)
+}
+
+// installRelease is the shared tail for release-shaped sources (forge release
+// and generic package): skip when the tag is unchanged and dest is intact, else
+// pick the asset, announce, and install. Returns the tag to record, or "".
+func installRelease(client *http.Client, s source, rel release, have string, p prefs, rp retryPolicy) (string, error) {
 	if rel.TagName == have && destPopulated(s.dest) {
 		fmt.Printf("%s: up to date (%s)\n", s.name, rel.TagName)
 		return "", nil
@@ -276,6 +383,100 @@ func syncOne(client *http.Client, s source, have string, p prefs, rp retryPolicy
 		return "", err
 	}
 	return rel.TagName, nil
+}
+
+// splitOwnerName splits an "owner/name" pair; ok is false unless both halves are
+// non-empty and there is exactly one slash.
+func splitOwnerName(s string) (owner, name string, ok bool) {
+	owner, name, ok = strings.Cut(s, "/")
+	return owner, name, ok && owner != "" && name != "" && !strings.Contains(name, "/")
+}
+
+// headOK reports nil when reqURL answers 200 to a HEAD: a reachability probe
+// (used by `up check`) that downloads nothing.
+func headOK(client *http.Client, reqURL, ua string, rp retryPolicy) error {
+	req, err := http.NewRequest(http.MethodHead, reqURL, nil)
+	if err != nil {
+		return err
+	}
+	setUserAgent(req, ua)
+	resp, err := doRetry(client, req, rp)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", reqURL, resp.Status)
+	}
+	return nil
+}
+
+// probeOne resolves a source over the network without downloading: it confirms
+// the latest version/listing is reachable and that match/ext pick exactly one
+// asset, returning a one-line description. This is the work behind `up check`,
+// so a wrong match, a moved repo, or an unreachable host is caught before a real
+// `up` (or a CI run) rather than mid-install.
+func probeOne(client *http.Client, s source, p prefs, rp retryPolicy) (string, error) {
+	pick := func(rel release) (string, error) {
+		a, err := rel.pickAsset(s.match, s.ext)
+		if err != nil {
+			return "", err
+		}
+		if rel.TagName != "" {
+			return fmt.Sprintf("%s (%s)", a.Name, rel.TagName), nil
+		}
+		return a.Name, nil
+	}
+	switch {
+	case s.url != "":
+		if err := headOK(client, s.url, p.UserAgent, rp); err != nil {
+			return "", err
+		}
+		return urlBase(s.url), nil
+	case s.index != "":
+		rel, err := fetchIndex(client, s.index, p.UserAgent, rp)
+		if err != nil {
+			return "", err
+		}
+		return pick(rel)
+	case s.pkg != "":
+		owner, name, _ := splitOwnerName(s.pkg)
+		rel, err := fetchLatestPackage(client, s.host, owner, name, p.UserAgent, rp)
+		if err != nil {
+			return "", err
+		}
+		return pick(rel)
+	case s.tag != "":
+		f, err := forgeFor(s.forge)
+		if err != nil {
+			return "", err
+		}
+		tag := s.tag
+		if tagIsLatest(tag) {
+			if tag, err = fetchLatestTag(client, f, s.host, s.repo, p.UserAgent, rp); err != nil {
+				return "", err
+			}
+		}
+		host := s.host
+		if host == "" {
+			host = f.defaultHost
+		}
+		dl := f.archiveURL(forgeBase(host), s.repo, tag)
+		if err := headOK(client, dl, p.UserAgent, rp); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s (%s)", urlBase(dl), tag), nil
+	default:
+		f, err := forgeFor(s.forge)
+		if err != nil {
+			return "", err
+		}
+		rel, err := fetchLatestRelease(client, f, s.host, s.repo, p.UserAgent, rp)
+		if err != nil {
+			return "", err
+		}
+		return pick(rel)
+	}
 }
 
 // syncURL handles a bare-url source: the URL is the file, installed under its

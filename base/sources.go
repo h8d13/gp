@@ -45,6 +45,8 @@ type release struct {
 // forge is one adapter: how to build the API URL for a repo, how to parse the
 // response body, and how to authenticate. defaultHost is used when a source
 // gives no host (GitHub is effectively single-instance; the others self-host).
+// tagsURL/parseTags/archiveURL add `tag =` support (latest tag's source
+// archive); they are nil where unsupported (GitHub, whose tags carry no order).
 type forge struct {
 	name        string
 	defaultHost string
@@ -52,6 +54,9 @@ type forge struct {
 	latestURL   func(host, repo string) string
 	parse       func([]byte) (release, error)
 	auth        func(*http.Request)
+	tagsURL     func(host, repo string) string      // list tags, newest first
+	parseTags   func([]byte) ([]string, error)      // tag names from that body
+	archiveURL  func(host, repo, tag string) string // source archive for a tag
 }
 
 // forges is the registry keyed by the `forge` ini value. Gitea/Forgejo/
@@ -69,6 +74,13 @@ var forges = map[string]forge{
 		},
 		parse: parseGitHubLike,
 		auth:  bearerAuth("GITHUB_TOKEN"),
+		// archiveURL but no tagsURL: a pinned `tag = <version>` works, but
+		// `tag = true` is refused because GitHub's /tags has no documented order
+		// (it returns sub-crate tags first on a monorepo). Archives live on
+		// github.com, not the api host; GitHub is single-instance, so hardcode it.
+		archiveURL: func(base, repo, tag string) string {
+			return fmt.Sprintf("https://github.com/%s/archive/refs/tags/%s.tar.gz", repo, tag)
+		},
 	},
 	"gitea": {
 		name:        "gitea",
@@ -79,6 +91,13 @@ var forges = map[string]forge{
 		},
 		parse: parseGitHubLike,
 		auth:  tokenAuth("GITEA_TOKEN"), // "Authorization: token <t>"
+		tagsURL: func(base, repo string) string {
+			return fmt.Sprintf("%s/api/v1/repos/%s/tags?limit=1", base, repo)
+		},
+		parseTags: parseTagNames,
+		archiveURL: func(base, repo, tag string) string {
+			return fmt.Sprintf("%s/%s/archive/%s.tar.gz", base, repo, tag)
+		},
 	},
 	"gitlab": {
 		name:        "gitlab",
@@ -92,6 +111,16 @@ var forges = map[string]forge{
 		},
 		parse: parseGitLab,
 		auth:  headerAuth("PRIVATE-TOKEN", "GITLAB_TOKEN"),
+		tagsURL: func(base, repo string) string {
+			id := strings.ReplaceAll(url.PathEscape(repo), "/", "%2F")
+			return fmt.Sprintf("%s/api/v4/projects/%s/repository/tags?order_by=updated&per_page=1", base, id)
+		},
+		parseTags: parseTagNames,
+		archiveURL: func(base, repo, tag string) string {
+			// The web archive endpoint names the file <repo>-<tag>.tar.gz (a nice
+			// extract dir), matching the URL GitLab's UI hands out.
+			return fmt.Sprintf("%s/%s/-/archive/%s/%s-%s.tar.gz", base, repo, tag, path.Base(repo), tag)
+		},
 	},
 }
 
@@ -138,37 +167,157 @@ func headerVal(hdr, prefix, env string) func(*http.Request) {
 	}
 }
 
-// fetchLatestRelease GETs the latest release of repo on the given forge/host,
-// returning the normalized release. It sets Accept and a User-Agent (forges
-// reject a missing UA) and applies the forge's token auth.
-func fetchLatestRelease(client *http.Client, f forge, host, repo, ua string, rp retryPolicy) (release, error) {
-	if host == "" {
-		host = f.defaultHost
-	}
-	req, err := http.NewRequest(http.MethodGet, f.latestURL(forgeBase(host), repo), nil)
+// forgeGET issues an authenticated forge API GET and returns the body. It sets
+// Accept and a User-Agent (forges reject a missing UA) and applies the forge's
+// token auth. A non-200 surfaces the body, which carries the forge's reason
+// (rate limit, not found, ...).
+func forgeGET(client *http.Client, f forge, reqURL, ua string, rp retryPolicy) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
-		return release{}, err
+		return nil, err
 	}
 	req.Header.Set("Accept", f.accept)
 	if ua == "" {
-		ua = "gp" // forges reject a missing User-Agent
+		ua = "gp"
 	}
 	setUserAgent(req, ua)
 	f.auth(req)
-
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
-		return release{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes))
 	if resp.StatusCode != http.StatusOK {
-		// The body carries the forge's reason (rate limit, not found, ...).
-		return release{}, fmt.Errorf("%s: %s: %s", repo, resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
+// fetchLatestRelease GETs the latest release of repo on the given forge/host,
+// returning the normalized release.
+func fetchLatestRelease(client *http.Client, f forge, host, repo, ua string, rp retryPolicy) (release, error) {
+	if host == "" {
+		host = f.defaultHost
+	}
+	body, err := forgeGET(client, f, f.latestURL(forgeBase(host), repo), ua, rp)
+	if err != nil {
+		return release{}, fmt.Errorf("%s: %w", repo, err)
 	}
 	rel, err := f.parse(body)
 	if err != nil {
 		return release{}, fmt.Errorf("%s: %w", repo, err)
+	}
+	return rel, nil
+}
+
+// parseTagNames decodes the GitLab/Gitea tag-list shape: an array of objects
+// with a name. Both APIs return newest first, so element 0 is the latest tag.
+func parseTagNames(body []byte) ([]string, error) {
+	var raw []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("decode tags: %w", err)
+	}
+	names := make([]string, len(raw))
+	for i, t := range raw {
+		names[i] = t.Name
+	}
+	return names, nil
+}
+
+// fetchLatestTag returns the newest tag of repo on the forge/host, for a
+// `tag = true` source.
+func fetchLatestTag(client *http.Client, f forge, host, repo, ua string, rp retryPolicy) (string, error) {
+	if host == "" {
+		host = f.defaultHost
+	}
+	body, err := forgeGET(client, f, f.tagsURL(forgeBase(host), repo), ua, rp)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", repo, err)
+	}
+	tags, err := f.parseTags(body)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", repo, err)
+	}
+	if len(tags) == 0 {
+		return "", fmt.Errorf("%s: no tags", repo)
+	}
+	return tags[0], nil
+}
+
+// getJSON GETs reqURL and decodes the JSON body into v. It sends a User-Agent
+// (Gitea/Forgejo reject a missing one) and a GITEA_TOKEN when set, mirroring the
+// release path's auth. Used by the generic-package resolver.
+func getJSON(client *http.Client, reqURL, ua string, rp retryPolicy, v any) error {
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if ua == "" {
+		ua = "gp"
+	}
+	setUserAgent(req, ua)
+	if t := os.Getenv("GITEA_TOKEN"); t != "" {
+		req.Header.Set("Authorization", "token "+t)
+	}
+	resp, err := doRetry(client, req, rp)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s: %s", reqURL, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return json.Unmarshal(body, v)
+}
+
+// fetchLatestPackage resolves the newest version of a Forgejo/Gitea generic
+// package (owner/name on host) into a normalized release: every file of that
+// version becomes an asset whose URL is the registry download path, so pickAsset
+// chooses among them by match/ext just as for a forge release. The package list
+// is newest-first, so the first entry whose name matches exactly is the latest.
+func fetchLatestPackage(client *http.Client, host, owner, name, ua string, rp retryPolicy) (release, error) {
+	base := forgeBase(host)
+	var pkgs []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	listURL := fmt.Sprintf("%s/api/v1/packages/%s?type=generic&q=%s",
+		base, url.PathEscape(owner), url.QueryEscape(name))
+	if err := getJSON(client, listURL, ua, rp, &pkgs); err != nil {
+		return release{}, fmt.Errorf("%s: %w", name, err)
+	}
+	version := ""
+	for _, pk := range pkgs {
+		if pk.Name == name { // exact name (q= is a substring filter); newest-first
+			version = pk.Version
+			break
+		}
+	}
+	if version == "" {
+		return release{}, fmt.Errorf("%s: no generic package %q on %s", name, name, host)
+	}
+
+	var files []struct {
+		Name string `json:"name"`
+	}
+	filesURL := fmt.Sprintf("%s/api/v1/packages/%s/generic/%s/%s/files",
+		base, url.PathEscape(owner), url.PathEscape(name), url.PathEscape(version))
+	if err := getJSON(client, filesURL, ua, rp, &files); err != nil {
+		return release{}, fmt.Errorf("%s: %w", name, err)
+	}
+	rel := release{TagName: version}
+	for _, f := range files {
+		dl := fmt.Sprintf("%s/api/packages/%s/generic/%s/%s/%s",
+			base, url.PathEscape(owner), url.PathEscape(name), url.PathEscape(version), url.PathEscape(f.Name))
+		rel.Assets = append(rel.Assets, asset{Name: f.Name, URL: dl})
+	}
+	if len(rel.Assets) == 0 {
+		return release{}, fmt.Errorf("%s: version %s has no files", name, version)
 	}
 	return rel, nil
 }

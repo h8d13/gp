@@ -75,7 +75,7 @@ func usage() {
 	// command (the URL form and `up`); download flags only for the URL form.
 	fmt.Fprintf(out, "\nCommands:\n")
 	fmt.Fprintf(out, "  %s up\n    \tinstall/update all tools from sources.ini\n", name)
-	fmt.Fprintf(out, "  %s up check\n    \tvalidate sources.ini and exit (no downloads)\n", name)
+	fmt.Fprintf(out, "  %s up check\n    \tresolve every source over the network, without downloading\n", name)
 	fmt.Fprintf(out, "  %s rm NAME...\n    \tforget a source's recorded version (prints its dest; deletes no files)\n", name)
 
 	fmt.Fprintf(out, "\nGlobal options (all commands):\n")
@@ -282,9 +282,10 @@ func Main() {
 	}
 
 	// `up` installs/updates every source (the download flags -p/-q/-r/-c/-n
-	// shape its fetches too); `up check` lints sources.ini without fetching.
-	// `rm NAME...` forgets a source's recorded version. An unknown `up X` is an
-	// error rather than a silent full install (e.g. a stray `up rm`).
+	// shape its fetches too); `up check` resolves every source over the network
+	// without downloading. `rm NAME...` forgets a source's recorded version. An
+	// unknown `up X` is an error rather than a silent full install (a stray `up
+	// rm`).
 	if len(posArgs) > 0 && posArgs[0] == "up" {
 		if len(posArgs) > 1 && posArgs[1] != "check" {
 			fmt.Fprintf(os.Stderr, "gp up: unknown subcommand %q (use `gp rm NAME` to uninstall)\n", posArgs[1])

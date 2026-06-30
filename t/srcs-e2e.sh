@@ -1,8 +1,8 @@
 #!/bin/sh
-# Config-validation suite for sources.ini, exercised through `gp up check`
-# (parse + validate, no network). The shipped sample is checked too, so a broken
-# sample is caught here rather than by a user who copied it. Hermetic: each case
-# writes its own sources.ini under a fresh XDG dir and never fetches.
+# Config-validation suite for sources.ini: the rejections loadSources makes (bad
+# keys, missing dest, ambiguous source type) plus the `gp rm` lock op. Every case
+# fails at parse or touches only the lock, so the suite stays hermetic -- the
+# network-probing half of `gp up check` is exercised in e2e.sh against serve.py.
 #
 #   sh t/srcs-e2e.sh
 
@@ -37,18 +37,6 @@ ok() {
 	fi
 }
 has() { case "$out" in *"$1"*) return 0 ;; esac; return 1; }
-
-# The shipped sample must validate, every section.
-rm -rf xdg && mkdir -p xdg/gp && cp "$ROOT/sources.ini" xdg/gp/sources.ini
-out=$(XDG_CONFIG_HOME="$PWD/xdg" "$GP" up check 2>&1)
-code=$?
-ok 'shipped sources.ini validates' 'test "$code" = 0 && has "sources OK"'
-
-check '[T]
-url = http://example.invalid/f
-dest = /opt/t
-'
-ok 'a minimal bare-url source validates' 'test "$code" = 0'
 
 check '[T]
 url = http://example.invalid/f
@@ -93,7 +81,42 @@ ok 'index without match/ext is rejected' 'test "$code" != 0 && has "match or ext
 check '[T]
 dest = /opt/t
 '
-ok 'a source with no url/index/repo is rejected' 'test "$code" != 0 && has "url, index, or repo"'
+ok 'a source with no url/index/package/repo is rejected' 'test "$code" != 0 && has "package, or repo"'
+
+check '[T]
+package = onlyonename
+match = linux
+dest = /opt/t
+'
+ok 'package not owner/name is rejected' 'test "$code" != 0 && has "owner/name"'
+
+check '[T]
+package = owner/tool
+match = linux
+dest = /opt/t
+'
+ok 'package without host is rejected' 'test "$code" != 0 && has "needs host"'
+
+check '[T]
+package = owner/tool
+host = http://x
+dest = /opt/t
+'
+ok 'package without match/ext is rejected' 'test "$code" != 0 && has "match or ext"'
+
+check '[T]
+tag = true
+dest = /opt/t
+'
+ok 'tag without repo is rejected' 'test "$code" != 0 && has "tag needs repo"'
+
+check '[T]
+forge = github
+repo = owner/tool
+tag = true
+dest = /opt/t
+'
+ok 'tag = true on github is rejected (unordered tag list)' 'test "$code" != 0 && has "no ordered tag list"'
 
 # --- gp rm: forget a source's lock entry, delete nothing (no network) ---
 rm -rf xdg && mkdir -p xdg/gp

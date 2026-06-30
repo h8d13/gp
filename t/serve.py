@@ -33,6 +33,13 @@
 #   SERVE_SUMS  path to a checksums file served (as text/plain) for any request
 #               path that ends in ".sha256" or contains "sums", so a source's
 #               sha256-url can resolve an asset's digest without the network.
+#   SERVE_PKGLIST / SERVE_PKGFILES  JSON files for the Forgejo/Gitea generic
+#               package API: the version list (/api/v1/packages/...) and the file
+#               list (.../files). The download (/api/packages/...) is the normal
+#               body path, so a `package =` source resolves and installs offline.
+#   SERVE_TAGS  JSON tag list (newest first) served for any ".../tags..." path,
+#               so a `tag = true` source resolves the latest tag; the archive
+#               download (.../archive/...) is the normal body path.
 #
 # Prints the bound base URL on the first stdout line, then serves forever.
 # Side-effect files written in CWD: "ua" (last User-Agent), "maxconc" (peak
@@ -116,8 +123,35 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(BODY)))
         self.end_headers()
 
+    def _send_file(self, path, ctype):
+        with open(path, "rb") as fh:
+            payload = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _serve(self):
         open("ua", "w").write(self.headers.get("User-Agent", ""))
+        # Generic package registry: the version list (/api/v1/packages/{owner}?
+        # type=generic) returns SERVE_PKGLIST; the file list (.../files) returns
+        # SERVE_PKGFILES; the actual download (/api/packages/...) is the normal
+        # body path further down.
+        pkgfiles = os.environ.get("SERVE_PKGFILES")
+        if pkgfiles and "/api/v1/packages/" in self.path and self.path.endswith("/files"):
+            self._send_file(pkgfiles, "application/json")
+            return
+        pkglist = os.environ.get("SERVE_PKGLIST")
+        if pkglist and "/api/v1/packages/" in self.path:
+            self._send_file(pkglist, "application/json")
+            return
+        # Tag list for a `tag =` source: any ".../tags..." path returns
+        # SERVE_TAGS; the archive download (.../archive/...) is the normal body.
+        tagsfile = os.environ.get("SERVE_TAGS")
+        if tagsfile and "/tags" in self.path:
+            self._send_file(tagsfile, "application/json")
+            return
         # Forge release API: any ".../releases/.../latest" path returns the
         # SERVE_RELEASE JSON, read fresh so the test can write it post-bind.
         # Directory index: a path ending in "/" returns the SERVE_INDEX HTML

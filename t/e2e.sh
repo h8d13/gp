@@ -106,6 +106,19 @@ user-agent = gp/1.0
 	test "$(cat "$d/ua")" = from-env
 '
 
+# Full precedence chain (real env > .env > ini > default), the order loadPrefs
+# resolves -- here observed through the served User-Agent.
+test_expect_success 'config precedence: .env over ini, real env over .env' '
+	serve http &&
+	write_ini "[user]
+user-agent = from-ini
+" &&
+	printf "USER_AGENT=from-dotenv\n" >.env &&
+	gp "$URL" && test "$code" = 0 && test "$(cat "$d/ua")" = from-dotenv &&
+	export USER_AGENT=from-env && gp "$URL" && test "$code" = 0 &&
+	test "$(cat "$d/ua")" = from-env
+'
+
 # --- scheme / always-encrypt -----------------------------------------
 test_expect_success 'plain HTTP fetch reports 200 OK' '
 	serve http && gp "$URL" &&
@@ -952,6 +965,108 @@ dest = $PWD/inst
 " &&
 	gp up; test "$code" != 0 && contains "checksum mismatch" "$out" &&
 	! test -e inst && ! test -e "$LOCK"
+'
+
+# --- up: generic package sources (Forgejo/Gitea registry) -------------
+# serve.py mocks the package API: SERVE_PKGLIST is the version list, SERVE_PKGFILES
+# the file list, and the /api/packages/ download is the normal body. So a
+# `package =` source resolves the latest version and installs offline.
+test_expect_success TAR 'up installs a generic package, resolving the latest version' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	printf "%s" "[{\"type\":\"generic\",\"name\":\"tool\",\"version\":\"3.2.1\"}]" >list.json &&
+	printf "%s" "[{\"name\":\"tool-linux-x86_64.tar.gz\"},{\"name\":\"tool-win.zip\"}]" >files.json &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_PKGLIST="$PWD/list.json" \
+		SERVE_PKGFILES="$PWD/files.json" && serve http &&
+	write_sources "[TOOL]
+package = owner/tool
+host = $URL
+match = linux-x86_64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing 3.2.1" "$out" &&
+	test "$(cat inst/file.txt)" = hello &&
+	grep -q "TOOL = 3.2.1" "$LOCK"
+'
+
+# A package name that does not match exactly (q= is a substring filter) is not
+# the package we asked for, so resolution fails rather than grabbing a sibling.
+test_expect_success 'up errors when the generic package name has no exact match' '
+	printf "%s" "[{\"type\":\"generic\",\"name\":\"tool-extra\",\"version\":\"1.0\"}]" >list.json &&
+	export SERVE_PKGLIST="$PWD/list.json" && serve http &&
+	write_sources "[TOOL]
+package = owner/tool
+host = $URL
+match = linux
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up; test "$code" != 0 && contains "no generic package" "$out"
+'
+
+# --- up check: network probe (resolve, do not download) --------------
+test_expect_success 'up check resolves a forge release without downloading' '
+	export SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = linux-amd64
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up check && test "$code" = 0 &&
+	contains "ok," "$out" && contains "v1.0.0" "$out" &&
+	! test -e inst   # probe only: nothing installed
+'
+
+test_expect_success 'up check reports an unresolvable source (bad match)' '
+	export SERVE_RELEASE="$PWD/rel.json" && serve http &&
+	gh_release tool-linux-amd64.tar.gz v1.0.0 &&
+	write_sources "[TOOL]
+host = $URL
+repo = owner/tool
+match = nonexistent-asset
+ext = tar.gz
+dest = $PWD/inst
+" &&
+	gp up check; test "$code" != 0 && contains "unresolved" "$out"
+'
+
+# --- up: tag sources (latest git tag's source archive) ---------------
+# serve.py SERVE_TAGS mocks the tags API (newest first); the archive download
+# (.../archive/...) is the normal body. tag = true resolves the newest tag.
+test_expect_success TAR 'up installs the latest git tag archive (tag = true)' '
+	mkdir srcd && echo hello >srcd/file.txt && tar czf app.tgz -C srcd . &&
+	printf "%s" "[{\"name\":\"2.0\"},{\"name\":\"1.0\"}]" >tags.json &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_TAGS="$PWD/tags.json" && serve http &&
+	write_sources "[TOOL]
+forge = gitea
+host = $URL
+repo = owner/tool
+tag = true
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing 2.0" "$out" &&
+	test "$(cat inst/file.txt)" = hello && grep -q "TOOL = 2.0" "$LOCK"
+'
+
+# A literal tag (here a rolling "latest") needs no tag list -- gp builds the
+# archive URL directly and versions it by the HTTP validator, so a second run is
+# a no-op until the tag is force-moved (the validator changes).
+test_expect_success TAR 'up installs a literal/rolling tag archive, validator-versioned' '
+	mkdir srcd && echo hi >srcd/f.txt && tar czf app.tgz -C srcd . &&
+	export SERVE_FILE="$PWD/app.tgz" SERVE_ETAG=tagrev && serve http &&
+	write_sources "[TOOL]
+forge = gitea
+host = $URL
+repo = owner/tool
+tag = latest
+dest = $PWD/inst
+" &&
+	gp up && test "$code" = 0 && contains "installing" "$out" &&
+	test "$(cat inst/f.txt)" = hi && grep -q "TOOL = tagrev" "$LOCK" &&
+	gp up && test "$code" = 0 && contains "up to date" "$out"
 '
 
 test_done

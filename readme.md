@@ -5,6 +5,9 @@
 > Inspired by some of [curl](https://github.com/curl/curl).
 > Also doubles as a **sources and extract** manager. **HTTP Only**.
 
+`-x` extraction and `--compress` shell out to system decompressors
+(`xz zstd gzip bzip2 brotli`; see [deps](./deps)) rather than vendoring Go ports.
+
 See [config](./config.ini) and [sources](./sources.ini) for examples.
 
 ---
@@ -20,7 +23,7 @@ Commands:
   gp up
     	install/update all tools from sources.ini
   gp up check
-    	validate sources.ini and exit (no downloads)
+    	resolve every source over the network, without downloading
   gp rm NAME...
     	forget a source's recorded version (prints its dest; deletes no files)
 

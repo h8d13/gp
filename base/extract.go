@@ -1,7 +1,8 @@
 // Tar extraction for downloaded archives. The tar payload may be raw or
 // wrapped in gzip, zstd, xz, or bzip2; the codec is picked by magic bytes, not
-// the filename, so a mislabeled archive still unpacks. gzip and bzip2 are
-// stdlib; zstd and xz are pure-Go (no cgo) third-party readers.
+// the filename, so a mislabeled archive still unpacks. Each wrapper is decoded
+// by shelling out to the system tool (see decodeCmd), so there are no vendored
+// decompressors.
 //
 // Two layers keep a hostile archive inside destDir (the classic "Zip Slip"):
 // safeJoin rejects a lexical escape in the entry name ("../" or an absolute
@@ -15,22 +16,18 @@ package base
 import (
 	"archive/tar"
 	"bufio"
-	"compress/bzip2"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/klauspost/compress/zstd"
-	"github.com/ulikunitz/xz"
 )
 
-// decompress wraps br in the right decompressor for the tar payload, chosen by
-// leading magic bytes: gzip, zstd, xz, or bzip2; an unrecognized header is read
-// as a plain (uncompressed) tar. Peek does not consume, so the returned reader
-// still starts at byte 0. closeFn releases the codec (nil when none needs it).
+// decompress streams br through the right system decompressor for the tar
+// payload, chosen by leading magic bytes: gzip, zstd, xz, or bzip2; an
+// unrecognized header is read as a plain (uncompressed) tar. Peek does not
+// consume, so the tool reads the stream from byte 0. closeFn reaps the process
+// (nil for the plain-tar case).
 func decompress(br *bufio.Reader) (io.Reader, func() error, error) {
 	// 6 bytes covers the longest signature (xz). Short reads (a tiny archive)
 	// just fall through the length guards to the plain-tar default.
@@ -48,25 +45,13 @@ func decompress(br *bufio.Reader) (io.Reader, func() error, error) {
 	}
 	switch {
 	case has(0x1f, 0x8b): // gzip
-		gz, err := gzip.NewReader(br)
-		if err != nil {
-			return nil, nil, err
-		}
-		return gz, gz.Close, nil
+		return decodeCmd("gzip", br)
 	case has(0x28, 0xb5, 0x2f, 0xfd): // zstd
-		zr, err := zstd.NewReader(br)
-		if err != nil {
-			return nil, nil, err
-		}
-		return zr, func() error { zr.Close(); return nil }, nil
+		return decodeCmd("zstd", br)
 	case has(0xfd, '7', 'z', 'X', 'Z', 0x00): // xz
-		xr, err := xz.NewReader(br)
-		if err != nil {
-			return nil, nil, err
-		}
-		return xr, nil, nil
+		return decodeCmd("xz", br)
 	case has('B', 'Z', 'h'): // bzip2
-		return bzip2.NewReader(br), nil, nil
+		return decodeCmd("bzip2", br)
 	default:
 		return br, nil, nil
 	}

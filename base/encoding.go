@@ -12,19 +12,15 @@
 package base
 
 import (
-	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-
-	"github.com/andybalholm/brotli"
-	"github.com/klauspost/compress/zstd"
 )
 
-// acceptEncoding is what --compress advertises: the codings decodeBody handles.
-// gzip is stdlib; zstd and br are pure-Go (already vendored for tar extraction
-// and added alongside). Order is preference, strongest ratio first.
+// acceptEncoding is what --compress advertises: the codings decodeBody handles
+// (each decoded by shelling out to gzip/zstd/brotli; see decodeCmd). Order is
+// preference, strongest ratio first.
 const acceptEncoding = "zstd, br, gzip"
 
 // isIdentity reports whether a Content-Encoding means "no decoding needed".
@@ -32,30 +28,22 @@ func isIdentity(enc string) bool {
 	return enc == "" || strings.EqualFold(enc, "identity")
 }
 
-// decodeBody wraps resp.Body in the decoder named by its Content-Encoding,
-// returning the plaintext reader and a closer (nil when the codec needs none).
-// An identity response passes through untouched, so the default (non-compress)
-// path is unaffected. An unknown coding -- notably deflate -- is a hard error
-// rather than a silently corrupt file.
+// decodeBody streams resp.Body through the decoder named by its Content-Encoding,
+// returning the plaintext reader and a closer (nil when none is needed). An
+// identity response passes through untouched, so the default (non-compress) path
+// is unaffected. An unknown coding -- notably deflate -- is a hard error rather
+// than a silently corrupt file.
 func decodeBody(resp *http.Response) (io.Reader, func() error, error) {
 	enc := resp.Header.Get("Content-Encoding")
 	switch {
 	case isIdentity(enc):
 		return resp.Body, nil, nil
 	case strings.EqualFold(enc, "gzip"):
-		gz, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		return gz, gz.Close, nil
+		return decodeCmd("gzip", resp.Body)
 	case strings.EqualFold(enc, "zstd"):
-		zr, err := zstd.NewReader(resp.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		return zr, func() error { zr.Close(); return nil }, nil
+		return decodeCmd("zstd", resp.Body)
 	case strings.EqualFold(enc, "br"):
-		return brotli.NewReader(resp.Body), nil, nil
+		return decodeCmd("brotli", resp.Body)
 	default:
 		return nil, nil, fmt.Errorf("unsupported Content-Encoding %q (deflate is not implemented)", enc)
 	}
