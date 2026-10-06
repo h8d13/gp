@@ -1,7 +1,6 @@
-// Live download progress on stderr. Rendered only when stderr is a
-// terminal, so piped or redirected runs (scripts, tests, `gp ... | foo`)
-// stay byte-clean. A single goroutine owns all rendering; writers just
-// bump an atomic counter, which keeps the parallel path lock-free.
+// Live progress on stderr, only on a TTY so pipes stay byte-clean. One
+// goroutine renders; writers bump an atomic, keeping the split path
+// lock-free.
 package base
 
 import (
@@ -15,10 +14,8 @@ import (
 	"golang.org/x/term"
 )
 
-// progress reports bytes transferred against an optional total. A nil
-// *progress is a valid no-op, so callers never branch on TTY-ness. The
-// mutable phase fields are atomic so reset() can re-arm the bar from the
-// main goroutine while the render goroutine reads, without a lock.
+// A nil *progress is a no-op, so callers never branch on TTY-ness. Atomics
+// let reset() re-arm the bar while render reads.
 type progress struct {
 	total     atomic.Int64
 	done      atomic.Int64
@@ -28,9 +25,7 @@ type progress struct {
 	ended     chan struct{}
 }
 
-// newProgress returns a live reporter, or nil (the no-op case) when
-// disabled or when stderr is not a terminal. total is the Content-Length
-// (0 if unknown); label tags the current phase.
+// total 0 means unknown (indeterminate bar).
 func newProgress(total int64, label string, enabled bool) *progress {
 	if !enabled || !isTerminal(os.Stderr) {
 		return nil
@@ -42,8 +37,7 @@ func newProgress(total int64, label string, enabled bool) *progress {
 	return p
 }
 
-// reset re-arms the same bar for a new phase (new total and label),
-// keeping the one render goroutine and output line. Safe on nil.
+// reset re-arms the same bar and line for a new phase.
 func (p *progress) reset(total int64, label string) {
 	if p == nil {
 		return
@@ -54,7 +48,6 @@ func (p *progress) reset(total int64, label string) {
 	p.label.Store(label)
 }
 
-// run starts the render loop in the background. Safe to call on nil.
 func (p *progress) run() {
 	if p == nil {
 		return
@@ -76,16 +69,14 @@ func (p *progress) run() {
 	}()
 }
 
-// add records n more transferred bytes. Safe on nil and from multiple
-// goroutines (the parallel path calls it from each connection).
 func (p *progress) add(n int64) {
 	if p != nil {
 		p.done.Add(n)
 	}
 }
 
-// finish stops rendering and blocks until the final line has printed, so
-// the caller's summary line never interleaves with progress output.
+// finish blocks until the last line is out, so the summary never
+// interleaves.
 func (p *progress) finish() {
 	if p == nil {
 		return
@@ -94,8 +85,6 @@ func (p *progress) finish() {
 	<-p.ended
 }
 
-// render draws one in-place status line. Trailing spaces erase the tail
-// of a previously longer line.
 func (p *progress) render() {
 	done, total := p.done.Load(), p.total.Load()
 	label, _ := p.label.Load().(string)
@@ -106,27 +95,24 @@ func (p *progress) render() {
 	cols := termCols()
 	var line string
 	if total <= 0 {
-		line = fmt.Sprintf("[%s] %s  %s/s", label, humanBytes(done), humanBytes(speed))
+		line = fmt.Sprintf("[%s] %s  %s/s",
+			label, humanBytes(done), humanBytes(speed))
 	} else {
-		// Size the bar to the space left after the surrounding text, capped, so
-		// it shrinks (to nothing) on a narrow terminal instead of overflowing
-		// and wrapping. A wrapped line defeats the \r in-place redraw.
+		// Shrink on narrow terminals: a wrapped line breaks the \r redraw.
 		frac := float64(done) / float64(total)
 		left := fmt.Sprintf("[%s] %5.1f%% [", label, frac*100)
-		right := fmt.Sprintf("] %s / %s  %s/s", humanBytes(done), humanBytes(total), humanBytes(speed))
+		right := fmt.Sprintf("] %s / %s  %s/s",
+			humanBytes(done), humanBytes(total), humanBytes(speed))
 		bw := max(min(24, cols-runeLen(left)-runeLen(right)-1), 0)
 		filled := max(0, min(bw, int(frac*float64(bw))))
 		bar := strings.Repeat("▓", filled) + strings.Repeat("░", bw-filled)
 		line = left + bar + right
 	}
-	// Clip to the terminal and erase any tail of a previously longer line
-	// (\x1b[K), so the redraw stays on one row.
+	// \x1b[K erases the tail of a longer previous line
 	fmt.Fprintf(os.Stderr, "\r%s\x1b[K", clip(line, cols-1))
 }
 
-// termCols returns stderr's terminal width in columns, or 80 when it cannot be
-// queried, so the bar always has a width to fit within. Queried each render so
-// a mid-transfer resize is picked up.
+// Queried per render to follow resizes.
 func termCols() int {
 	if w, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && w > 0 {
 		return w
@@ -134,12 +120,9 @@ func termCols() int {
 	return 80
 }
 
-// runeLen counts s in display columns: every glyph the bar uses (text, ▓/░, ✓)
-// is single-width, so a rune count is the column count.
+// Every glyph the bar uses is single-width, so runes = columns.
 func runeLen(s string) int { return len([]rune(s)) }
 
-// clip truncates s to at most n columns (rune-wise, never splitting a glyph) so
-// the rendered line fits the terminal.
 func clip(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -150,7 +133,6 @@ func clip(s string, n int) string {
 	return s
 }
 
-// progWriter forwards writes to w while reporting their length to p.
 type progWriter struct {
 	w io.Writer
 	p *progress
@@ -162,9 +144,6 @@ func (pw progWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// progReader forwards reads from r while reporting their length to p, so
-// the same bar can track consumption of an input stream (e.g. unpacking
-// an archive) as well as a download.
 type progReader struct {
 	r io.Reader
 	p *progress
@@ -176,8 +155,6 @@ func (pr progReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// isTerminal reports whether f is a character device (a TTY), so progress
-// never corrupts a pipe or a regular file.
 func isTerminal(f *os.File) bool {
 	st, err := f.Stat()
 	return err == nil && st.Mode()&os.ModeCharDevice != 0

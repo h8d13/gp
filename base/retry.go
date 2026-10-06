@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// retryPolicy is the resolved backoff config: max attempts, the first
-// backoff step, and the ceiling on any single wait.
 type retryPolicy struct {
 	n    int
 	base time.Duration
@@ -28,13 +26,11 @@ func (p prefs) retry() retryPolicy {
 	}
 }
 
-// retryStatus reports whether a response code warrants waiting and retrying.
 func retryStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable
 }
 
-// retryAfter parses a Retry-After header in either form: delta-seconds or an
-// HTTP-date. Returns the delay and whether the header was present and valid.
+// Retry-After is delta-seconds or an HTTP-date.
 func retryAfter(resp *http.Response) (time.Duration, bool) {
 	v := resp.Header.Get("Retry-After")
 	if v == "" {
@@ -55,9 +51,7 @@ func retryAfter(resp *http.Response) (time.Duration, bool) {
 	return 0, false
 }
 
-// nextWait returns the delay before the next attempt and whether the server
-// dictated it. A server Retry-After is taken as-is; otherwise exponential
-// base*2^attempt with full jitter, capped at rp.max.
+// No Retry-After: base*2^attempt with full jitter, capped at rp.max.
 func nextWait(resp *http.Response, attempt int, rp retryPolicy) (time.Duration, bool) {
 	if d, ok := retryAfter(resp); ok {
 		return d, true
@@ -69,10 +63,10 @@ func nextWait(resp *http.Response, attempt int, rp retryPolicy) (time.Duration, 
 	return time.Duration(rand.Int64N(int64(d) + 1)), false
 }
 
-// doRetry runs req, retrying up to rp.n times on 429/503. A server-set
-// Retry-After longer than rp.max stops the loop and surfaces the response
-// rather than stalling. req must be replayable (nil-body GET here).
-func doRetry(client *http.Client, req *http.Request, rp retryPolicy) (*http.Response, error) {
+// A Retry-After past rp.max returns the response rather than stall. req
+// must be replayable (nil-body GET).
+func doRetry(client *http.Client, req *http.Request,
+	rp retryPolicy) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err != nil {

@@ -1,16 +1,8 @@
-// Tar extraction for downloaded archives. The tar payload may be raw or
-// wrapped in gzip, zstd, xz, or bzip2; the codec is picked by magic bytes, not
-// the filename, so a mislabeled archive still unpacks. Each wrapper is decoded
-// by shelling out to the system tool (see decodeCmd), so there are no vendored
-// decompressors.
-//
-// Two layers keep a hostile archive inside destDir (the classic "Zip Slip"):
-// safeJoin rejects a lexical escape in the entry name ("../" or an absolute
-// path), and within() rejects an escape through a symlink, where one entry
-// makes a link pointing out of destDir and a later entry writes through it.
-// Symlinks themselves may point anywhere (a rootfs tarball legitimately ships
-// absolute links like /etc/machine-id); they are inert until something writes
-// through them, and within() blocks exactly that.
+// Tar extraction. Two layers keep a hostile archive inside destDir ("Zip
+// Slip"): safeJoin rejects a lexical escape ("../", absolute path), within()
+// rejects one through a symlink planted by an earlier entry. Symlinks may
+// point anywhere (rootfs tarballs ship /etc/machine-id links); they are
+// inert until written through, which within() blocks.
 package base
 
 import (
@@ -23,14 +15,11 @@ import (
 	"strings"
 )
 
-// decompress streams br through the right system decompressor for the tar
-// payload, chosen by leading magic bytes: gzip, zstd, xz, or bzip2; an
-// unrecognized header is read as a plain (uncompressed) tar. Peek does not
-// consume, so the tool reads the stream from byte 0. closeFn reaps the process
-// (nil for the plain-tar case).
+// Codec by magic bytes, not filename, so a mislabeled archive still unpacks;
+// an unknown header is a plain tar. Peek doesn't consume: the tool reads
+// from byte 0.
 func decompress(br *bufio.Reader) (io.Reader, func() error, error) {
-	// 6 bytes covers the longest signature (xz). Short reads (a tiny archive)
-	// just fall through the length guards to the plain-tar default.
+	// 6 covers xz, the longest; short reads fall through to plain tar.
 	magic, _ := br.Peek(6)
 	has := func(sig ...byte) bool {
 		if len(magic) < len(sig) {
@@ -57,9 +46,6 @@ func decompress(br *bufio.Reader) (io.Reader, func() error, error) {
 	}
 }
 
-// extractTarGz unpacks the archive at src into destDir and returns the number
-// of entries written. Any supported compression wrapper is decoded on the fly
-// (see decompress); a plain tar is read directly.
 func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	f, err := os.Open(src)
 	if err != nil {
@@ -67,8 +53,7 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	}
 	defer f.Close()
 
-	// Count bytes pulled from the archive file, so prog fills 0->100% as the
-	// stream is consumed (the decompressor reads compressed bytes through this).
+	// count compressed bytes, so the bar tracks the archive file
 	br := bufio.NewReader(progReader{f, prog})
 	r, closeFn, err := decompress(br)
 	if err != nil {
@@ -79,10 +64,8 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	}
 
 	tr := tar.NewReader(r)
-	// Don't touch the filesystem until the payload proves it's a tar: destDir
-	// is created lazily on the first valid entry, so a bogus body (an HTML
-	// error page, a wrong file) fails on the first header read without leaving
-	// an empty dir tree behind.
+	// destDir is made on the first valid header, so a non-tar body (an
+	// HTML error page) leaves no empty dir behind.
 	n := 0
 	made := false
 	for {
@@ -115,8 +98,6 @@ func extractTarGz(src, destDir string, prog *progress) (int, error) {
 	return n, nil
 }
 
-// safeJoin resolves name under dir and rejects any result that escapes
-// dir (path traversal). Returns the cleaned absolute-within-dir target.
 func safeJoin(dir, name string) (string, error) {
 	dir = filepath.Clean(dir)
 	target := filepath.Join(dir, name)
@@ -126,12 +107,9 @@ func safeJoin(dir, name string) (string, error) {
 	return target, nil
 }
 
-// within reports whether target stays inside destDir once the symlinks on its
-// existing ancestors are resolved. safeJoin only checks the name lexically; a
-// prior entry may have planted a symlink ancestor pointing out of destDir, so
-// the lexical path looks contained while the real one escapes. Resolving the
-// deepest existing ancestor catches that. destDir exists by the time any entry
-// is written, so it always anchors the walk.
+// within resolves target's deepest existing ancestor and requires it under
+// destDir. The parent is resolved, not target, so a symlink leaf may itself
+// point outside.
 func within(destDir, target string) (bool, error) {
 	root, err := filepath.EvalSymlinks(destDir)
 	if err != nil {
@@ -140,41 +118,34 @@ func within(destDir, target string) (bool, error) {
 	if target == filepath.Clean(destDir) {
 		return true, nil // the archive's own "." entry: destDir itself
 	}
-	// The entry is created inside target's parent, so resolve the deepest
-	// existing ancestor of that parent and require it to stay under root.
-	// Resolving the parent (not target) avoids tripping on a legitimate symlink
-	// leaf, whose own destination is allowed to point outside.
 	for p := filepath.Dir(target); ; {
 		if _, err := os.Lstat(p); err == nil {
 			real, err := filepath.EvalSymlinks(p)
 			if err != nil {
 				return false, err
 			}
-			return real == root || strings.HasPrefix(real, root+string(os.PathSeparator)), nil
+			sep := string(os.PathSeparator)
+			return real == root || strings.HasPrefix(real, root+sep), nil
 		}
 		parent := filepath.Dir(p)
-		if parent == p { // reached the filesystem root without an existing ancestor
+		if parent == p { // hit / without an existing ancestor
 			return false, nil
 		}
 		p = parent
 	}
 }
 
-// writeEntry materializes one tar entry. Directories and regular files are
-// created; symlinks are created verbatim (their target may point anywhere, but
-// nothing is ever written through them that escapes destDir; see within). Other
-// types (devices, fifos, hardlinks) are skipped.
+// Devices, fifos and hardlinks are skipped.
 func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 	switch hdr.Typeflag {
 	case tar.TypeDir, tar.TypeReg, tar.TypeSymlink:
-		// Refuse to create anything whose real (symlink-resolved) location
-		// has escaped destDir.
 		ok, err := within(destDir, target)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return fmt.Errorf("unsafe path escapes %s via a symlink: %q", destDir, hdr.Name)
+			return fmt.Errorf("unsafe path escapes %s via a symlink: %q",
+				destDir, hdr.Name)
 		}
 	}
 	switch hdr.Typeflag {
@@ -184,7 +155,8 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(hdr.Mode)&0o777)
+		mode := os.FileMode(hdr.Mode) & 0o777
+		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
 			return err
 		}

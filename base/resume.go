@@ -1,15 +1,10 @@
-// Resumable-download bookkeeping. A sidecar manifest next to the -o target
-// records which fixed-size chunks already landed, so a killed transfer
-// refetches only the gaps instead of restarting. The manifest is keyed on
-// (size, validator, chunk): if the remote file changed, none of the stale
-// local bytes are reused.
+// Resume bookkeeping. A .gp-part manifest records which chunks landed, so a
+// killed transfer refetches only the gaps. Keyed on (size, validator,
+// chunk): a changed remote reuses none of the stale bytes.
 package base
 
 const manifestSuffix = ".gp-part"
 
-// manifest is the on-disk resume state. Done[i] true means chunk i is fully
-// written. Validator is the remote's ETag (or Last-Modified) captured when
-// the download began; a mismatch on restart invalidates the whole manifest.
 type manifest struct {
 	Size      int64  `json:"size"`
 	Validator string `json:"validator"`
@@ -19,29 +14,23 @@ type manifest struct {
 
 func manifestPath(out string) string { return out + manifestSuffix }
 
-// newManifest plans size into ceil(size/chunk) not-yet-done chunks.
 func newManifest(size, chunk int64, validator string) manifest {
 	n := int((size + chunk - 1) / chunk)
-	return manifest{Size: size, Validator: validator, Chunk: chunk, Done: make([]bool, n)}
+	return manifest{Size: size, Validator: validator, Chunk: chunk,
+		Done: make([]bool, n)}
 }
 
-// loadManifest reads a manifest from path. ok is false when the file is
-// absent or unparsable: both mean "no resume state", not a hard error.
 func loadManifest(path string) (manifest, bool) {
 	var m manifest
 	return m, readJSON(path, &m)
 }
 
-// matches reports whether a saved manifest still describes the current
-// remote: same length, same validator, same chunking. An empty validator
-// never matches, so a server that offers no ETag/Last-Modified always
-// restarts from zero rather than risk stitching onto a changed file.
+// An empty validator never matches: the remote can't be proven unchanged.
 func (m manifest) matches(size int64, validator string, chunk int64) bool {
 	return validator != "" && m.Size == size &&
 		m.Validator == validator && m.Chunk == chunk
 }
 
-// remaining counts chunks still to fetch.
 func (m manifest) remaining() int {
 	n := 0
 	for _, d := range m.Done {
@@ -52,6 +41,4 @@ func (m manifest) remaining() int {
 	return n
 }
 
-// save writes m atomically beside the -o target (see writeJSONAtomic) so a
-// crash mid-write can never leave a torn manifest that misreports progress.
 func (m manifest) save(path string) error { return writeJSONAtomic(path, m) }
