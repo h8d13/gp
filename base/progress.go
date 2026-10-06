@@ -128,10 +128,7 @@ func (p *progress) render() {
 		frac := float64(done) / float64(total)
 		left := fmt.Sprintf("[%s] %5.1f%% [", label, frac*100)
 		right := fmt.Sprintf("] %s / %s  %s/s  %s", humanBytes(done), humanBytes(total), humanBytes(speed), note)
-		bw := min(24, cols-runeLen(left)-runeLen(right)-1)
-		if bw < 0 {
-			bw = 0
-		}
+		bw := max(min(24, cols-runeLen(left)-runeLen(right)-1), 0)
 		filled := max(0, min(bw, int(frac*float64(bw))))
 		bar := strings.Repeat("▓", filled) + strings.Repeat("░", bw-filled)
 		line = left + bar + right

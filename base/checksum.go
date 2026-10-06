@@ -94,7 +94,7 @@ func fetchChecksum(client *http.Client, sumURL, name, ua string, rp retryPolicy)
 func parseChecksum(body []byte, name string) (string, error) {
 	name = path.Base(name)
 	bare := ""
-	for _, line := range strings.Split(string(body), "\n") {
+	for line := range strings.SplitSeq(string(body), "\n") {
 		f := strings.Fields(line)
 		switch {
 		case len(f) == 0:

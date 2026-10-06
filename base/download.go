@@ -62,18 +62,9 @@ func splitSegment(size int64, conns int, chunk int64) int64 {
 	if chunk <= 0 {
 		chunk = defaultChunkBytes
 	}
-	if conns < 1 {
-		conns = 1
-	}
+	conns = max(conns, 1)
 	const maxSeg = 64 << 20
-	seg := (size + int64(conns) - 1) / int64(conns)
-	if seg < chunk {
-		seg = chunk
-	}
-	if seg > maxSeg {
-		seg = maxSeg
-	}
-	return seg
+	return min(max((size+int64(conns)-1)/int64(conns), chunk), maxSeg)
 }
 
 // saveSplitAuto runs an optimal parallel split of resp into out, and is the one
@@ -165,7 +156,7 @@ func download(client *http.Client, url, ua string, f *os.File, m manifest, save 
 	}
 
 	var total int64
-	var next int64 // atomic cursor into pending
+	var next atomic.Int64 // cursor into pending
 	var mu sync.Mutex
 	var firstErr error
 	var wg sync.WaitGroup
@@ -173,7 +164,7 @@ func download(client *http.Client, url, ua string, f *os.File, m manifest, save 
 	worker := func() {
 		defer wg.Done()
 		for {
-			k := int(atomic.AddInt64(&next, 1)) - 1
+			k := int(next.Add(1)) - 1
 			if k >= len(pending) {
 				return
 			}

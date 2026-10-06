@@ -185,10 +185,7 @@ func newSplitClient(p prefs) (*http.Client, func() error) {
 	if p.Quic {
 		return newClient(p)
 	}
-	conns := p.Parallel
-	if conns < 1 {
-		conns = 1
-	}
+	conns := max(p.Parallel, 1)
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment, // honor HTTP(S)_PROXY/NO_PROXY
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
