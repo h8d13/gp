@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ type progress struct {
 	startNano atomic.Int64
 	label     atomic.Value // string, e.g. "DL" / "XT"
 	stop      chan struct{}
+	stopOnce  sync.Once
 	ended     chan struct{}
 }
 
@@ -76,12 +78,12 @@ func (p *progress) add(n int64) {
 }
 
 // finish blocks until the last line is out, so the summary never
-// interleaves.
+// interleaves. Idempotent: callers both defer it and call it before output.
 func (p *progress) finish() {
 	if p == nil {
 		return
 	}
-	close(p.stop)
+	p.stopOnce.Do(func() { close(p.stop) })
 	<-p.ended
 }
 

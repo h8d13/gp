@@ -31,6 +31,17 @@ func (m manifest) matches(size int64, validator string, chunk int64) bool {
 		m.Validator == validator && m.Chunk == chunk
 }
 
+// doneBytes is exact: the last chunk may be short.
+func (m manifest) doneBytes() int64 {
+	var n int64
+	for i, d := range m.Done {
+		if d {
+			n += min(m.Chunk, m.Size-int64(i)*m.Chunk)
+		}
+	}
+	return n
+}
+
 func (m manifest) remaining() int {
 	n := 0
 	for _, d := range m.Done {

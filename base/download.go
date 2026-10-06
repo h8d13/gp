@@ -92,18 +92,14 @@ func saveSplit(client *http.Client, resp *http.Response, out string, p prefs,
 	}
 	defer f.Close()
 
-	// Seed the bar with chunks already on disk.
 	if resume {
-		prog.add(int64(len(m.Done)-m.remaining()) * m.Chunk)
+		prog.add(m.doneBytes()) // seed the bar with what is on disk
+		fmt.Fprintf(os.Stderr, "resume: %d/%d chunks left\n",
+			m.remaining(), len(m.Done))
 	}
-
 	save := ""
 	if validator != "" {
 		save = mp
-	}
-	if resume {
-		fmt.Fprintf(os.Stderr, "resume: %d/%d chunks left\n",
-			m.remaining(), len(m.Done))
 	}
 
 	n, err := download(client, resp.Request.URL.String(), p.UserAgent, f, m,
@@ -157,7 +153,8 @@ func download(client *http.Client, url, ua string, f *os.File, m manifest,
 			if end >= m.Size {
 				end = m.Size - 1
 			}
-			n, err := fetchRange(client, url, ua, f, start, end, rp, prog)
+			n, err := fetchRange(client, url, ua, m.Validator, f,
+				start, end, rp, prog)
 			total.Add(n)
 
 			mu.Lock()
@@ -195,13 +192,18 @@ func saveStream(out string, body io.Reader, prog *progress) (int64, error) {
 }
 
 // Concurrent calls at disjoint offsets are safe: WriteAt is pwrite.
-func fetchRange(client *http.Client, url, ua string, f *os.File,
+func fetchRange(client *http.Client, url, ua, validator string, f *os.File,
 	start, end int64, rp retryPolicy, prog *progress) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	// A changed remote then answers 200 instead of splicing in new bytes.
+	// RFC 9110 forbids weak ETags and bare dates here, so only strong ETags.
+	if strings.HasPrefix(validator, `"`) {
+		req.Header.Set("If-Range", validator)
+	}
 	setUserAgent(req, ua)
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
@@ -212,5 +214,13 @@ func fetchRange(client *http.Client, url, ua string, f *os.File,
 		return 0, fmt.Errorf("range %d-%d: want 206, got %s",
 			start, end, resp.Status)
 	}
-	return io.Copy(progWriter{io.NewOffsetWriter(f, start), prog}, resp.Body)
+	// CopyN: a longer body must not spill into the next chunk.
+	want := end - start + 1
+	w := progWriter{io.NewOffsetWriter(f, start), prog}
+	n, err := io.CopyN(w, resp.Body, want)
+	if err == io.EOF {
+		err = fmt.Errorf("range %d-%d: short body (%d of %d bytes)",
+			start, end, n, want)
+	}
+	return n, err
 }

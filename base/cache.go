@@ -12,9 +12,10 @@ import (
 const metaSuffix = ".gp-meta"
 
 // URL guards against replaying a validator for another source written to
-// the same path.
+// the same path; Size against a file truncated since (a killed --force run).
 type meta struct {
 	URL     string `json:"url"`
+	Size    int64  `json:"size"`
 	ETag    string `json:"etag,omitempty"`
 	LastMod string `json:"last_modified,omitempty"`
 }
@@ -27,9 +28,14 @@ func loadMeta(path string) (meta, bool) {
 }
 
 // No validator means nothing to replay later: ok is false.
-func metaFrom(url string, resp *http.Response) (meta, bool) {
+func metaFrom(url string, resp *http.Response, out string) (meta, bool) {
+	fi, err := os.Stat(out)
+	if err != nil {
+		return meta{}, false
+	}
 	m := meta{
 		URL:     url,
+		Size:    fi.Size(),
 		ETag:    resp.Header.Get("ETag"),
 		LastMod: resp.Header.Get("Last-Modified"),
 	}
@@ -51,19 +57,21 @@ func (m meta) applyConditional(req *http.Request) {
 	}
 }
 
-// Conditional only when out is a complete cache of url: it exists, no
-// resume is pending, and the meta names the same url.
+// Conditional only when out is a complete cache of url: no resume is
+// pending, and the meta names the same url and out's current size.
 func applyCachedValidator(req *http.Request, out, url string, force bool) {
 	if out == "" || force {
 		return
 	}
-	if _, err := os.Stat(out); err != nil {
+	fi, err := os.Stat(out)
+	if err != nil {
 		return
 	}
 	if _, err := os.Stat(manifestPath(out)); err == nil {
 		return // a resume is pending: not a complete cache
 	}
-	if m, ok := loadMeta(metaPath(out)); ok && m.URL == url {
+	m, ok := loadMeta(metaPath(out))
+	if ok && m.URL == url && m.Size == fi.Size() {
 		m.applyConditional(req)
 	}
 }

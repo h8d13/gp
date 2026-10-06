@@ -8,8 +8,10 @@ package base
 import (
 	"archive/tar"
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,6 +157,9 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
+		if err := unlink(target); err != nil {
+			return err
+		}
 		mode := os.FileMode(hdr.Mode) & 0o777
 		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
@@ -164,8 +169,20 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, destDir, target string) error {
 		_, err = io.Copy(f, tr)
 		return err
 	case tar.TypeSymlink:
+		if err := unlink(target); err != nil {
+			return err
+		}
 		return os.Symlink(hdr.Linkname, target)
 	default:
 		return nil
 	}
+}
+
+// unlink clears target before a create (as GNU tar does): OpenFile would
+// follow a symlink an earlier entry planted at this name, out of destDir.
+func unlink(target string) error {
+	if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }

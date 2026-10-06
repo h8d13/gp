@@ -37,7 +37,7 @@ type prefs struct {
 	ParallelMin   int    // min body size in bytes to split (default 8 MiB)
 	ChunkBytes    int    // resume/split chunk size in bytes (default 4 MiB)
 	Quic          bool   // speak HTTP/3 over QUIC instead of h1/h2 (default false)
-	Compress      bool   // accept gzip-the-wire; forfeits ranges/304 (default false)
+	Compress      bool   // accept gzip/zstd/br; forfeits ranges/304 (default false)
 	Retries       int    // retries on 429/503 with backoff (default 3)
 	RetryBaseMs   int    // first backoff step in ms when no Retry-After (default 500)
 	RetryCapMs    int    // ceiling on any single backoff wait in ms (default 30000)

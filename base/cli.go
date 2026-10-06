@@ -227,11 +227,11 @@ func Main() {
 	if ret >= 0 {
 		p.Retries = ret
 	}
-	if chk > 0 {
+	// -c pins the span; otherwise saveSplitAuto sizes it from ContentLength.
+	pinned := chk > 0
+	if pinned {
 		p.ChunkBytes = chk
 	}
-	// -c pins the span; otherwise saveSplitAuto sizes it from ContentLength.
-	chunkSet := wasSet("c", "chunk")
 	if noProg {
 		p.Progress = false
 	}
@@ -242,43 +242,50 @@ func Main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	url := posArgs[0]
-	url = urlScheme(url, p.AlwaysEncrypt)
+	url := urlScheme(posArgs[0], p.AlwaysEncrypt)
 	if p.Quic && strings.HasPrefix(url, "http://") {
 		url = "https://" + strings.TrimPrefix(url, "http://")
 		fmt.Fprintln(os.Stderr,
 			"quic: upgraded http:// to https:// (QUIC is TLS-only)")
 	}
+	// Exit only here, after fetch's defers ran (temp archive, progress line).
+	if err := fetch(p, url, out, extract, force, pinned); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
 
+func fetch(p prefs, url, out, extract string, force, pinned bool) error {
 	client, closeClient := newClient(p)
 	defer closeClient()
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "request:", err)
-		os.Exit(1)
+		return fmt.Errorf("request: %w", err)
 	}
 	setUserAgent(req, p.UserAgent)
 	if p.Compress {
 		// Forfeits ranges/resume/304.
 		req.Header.Set("Accept-Encoding", acceptEncoding)
 	}
-
 	applyCachedValidator(req, out, url, force)
 
 	rp := p.retry()
 	start := time.Now()
 	resp, err := doRetry(client, req, rp)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fetch:", err)
-		os.Exit(1)
+		return fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Unchanged on disk. -x is skipped too; --force if dest was removed.
 	if resp.StatusCode == http.StatusNotModified {
 		fmt.Fprintf(os.Stderr, "%s %s (cached: %s)\n", url, resp.Status, out)
-		return
+		return nil
+	}
+	// Before touching disk: an error page must never replace a good -o file.
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("fetch: %s: %s", url, resp.Status)
 	}
 
 	// Only -o saves; -x alone stages a temp archive; with neither, stdout.
@@ -287,17 +294,16 @@ func Main() {
 		// honors $TMPDIR, e.g. to keep big archives off a small tmpfs
 		tf, err := os.CreateTemp("", "gp-archive-*")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "extract:", err)
-			os.Exit(1)
+			return fmt.Errorf("extract: %w", err)
 		}
-		out = tf.Name()
 		tf.Close()
+		out = tf.Name()
 		defer os.Remove(out) // user asked for files, not the tarball
+		defer os.Remove(manifestPath(out))
 	}
 	if out != "" {
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-			fmt.Fprintln(os.Stderr, "save:", err)
-			os.Exit(1)
+			return fmt.Errorf("save: %w", err)
 		}
 	}
 
@@ -310,37 +316,35 @@ func Main() {
 	// One bar for the run: [DL], then reset to [XT] for extraction.
 	prog := newProgress(total, "DL", p.Progress)
 	prog.run()
+	defer prog.finish()
 	switch {
 	// Never split a compressed transfer: ranges address the encoded stream.
 	case !p.Compress && out != "" && p.splittable(resp):
 		resp.Body.Close() // drop the probe stream; range requests refetch
-		n, err = saveSplitAuto(resp, out, p, chunkSet, rp, prog)
+		n, err = saveSplitAuto(resp, out, p, pinned, rp, prog)
 	default:
 		// No -o: stream to stdout so `gp URL | tar xz` works.
 		body, closeBody, derr := decodeBody(resp)
 		if derr != nil {
-			err = derr
+			return fmt.Errorf("read: %w", derr)
+		}
+		if closeBody != nil {
+			defer closeBody()
+		}
+		if out != "" {
+			n, err = saveStream(out, body, prog)
 		} else {
-			if closeBody != nil {
-				defer closeBody()
-			}
-			if out != "" {
-				n, err = saveStream(out, body, prog)
-			} else {
-				n, err = io.Copy(progWriter{os.Stdout, prog}, body)
-			}
+			n, err = io.Copy(progWriter{os.Stdout, prog}, body)
 		}
 	}
 	if err != nil {
-		prog.finish()
-		fmt.Fprintln(os.Stderr, "read:", err)
-		os.Exit(1)
+		return fmt.Errorf("read: %w", err)
 	}
 	elapsed := time.Since(start)
 
 	// Best-effort: a failed write only costs the next run's 304.
-	if explicitOut && resp.StatusCode == http.StatusOK {
-		if m, ok := metaFrom(url, resp); ok {
+	if explicitOut {
+		if m, ok := metaFrom(url, resp, out); ok {
 			_ = m.save(metaPath(out))
 		}
 	}
@@ -350,11 +354,8 @@ func Main() {
 		if fi, statErr := os.Stat(out); statErr == nil {
 			prog.reset(fi.Size(), "XT")
 		}
-		cnt, err = extractTarGz(out, extract, prog)
-		if err != nil {
-			prog.finish()
-			fmt.Fprintln(os.Stderr, "extract:", err)
-			os.Exit(1)
+		if cnt, err = extractTarGz(out, extract, prog); err != nil {
+			return fmt.Errorf("extract: %w", err)
 		}
 	}
 	prog.finish()
@@ -369,4 +370,5 @@ func Main() {
 	if extract != "" {
 		fmt.Fprintf(os.Stderr, "extracted %d entries to %s\n", cnt, extract)
 	}
+	return nil
 }

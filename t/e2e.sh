@@ -312,6 +312,16 @@ test_expect_success 'cache is not reused for a different URL' '
 	gp -o out.bin "$URL/b" && test "$code" = 0 && contains "200 OK" "$out"
 '
 
+# A file cut short after a good run (e.g. a killed --force) keeps a valid
+# meta; the size guard must refetch instead of answering "cached".
+test_expect_success 'a truncated file is refetched, not served from cache' '
+	export SERVE_SIZE=4096 SERVE_ETAG=v1 && serve http &&
+	gp -o out.bin "$URL" && test "$code" = 0 &&
+	head -c 100 out.bin >cut && mv cut out.bin &&
+	gp -o out.bin "$URL" && test "$code" = 0 && contains "200 OK" "$out" &&
+	test "$(wc -c <out.bin)" = 4096
+'
+
 # A pending resume (a .gp-part manifest on disk) must suppress the conditional:
 # the local file is incomplete, so a 304 "you already have it" would be wrong.
 test_expect_success 'a pending resume suppresses the conditional request' '
@@ -320,7 +330,7 @@ test_expect_success 'a pending resume suppresses the conditional request' '
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	cp ref.bin out.bin &&
 	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,false,true,false]}" >out.bin.gp-part &&
-	printf "%s" "{\"url\":\"$URL\",\"etag\":\"v1\"}" >out.bin.gp-meta &&
+	printf "%s" "{\"url\":\"$URL\",\"size\":262144,\"etag\":\"v1\"}" >out.bin.gp-meta &&
 	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && contains "200 OK" "$out" && cmp ref.bin out.bin
 '
@@ -331,6 +341,23 @@ test_expect_success 'a pending resume suppresses the conditional request' '
 test_expect_success 'no URL given errors with usage, no fetch' '
 	gp -o out.bin; test "$code" != 0 &&
 	contains "no URL" "$out" && ! test -e out.bin
+'
+
+# An error status must fail before touching disk: a 404/500 page must never
+# replace a good file at -o.
+test_expect_success 'an error status fails and leaves an existing -o file alone' '
+	echo good >keep.txt &&
+	export SERVE_STATUS=404 && serve http &&
+	gp -o keep.txt "$URL"; test "$code" != 0 &&
+	contains "404" "$out" && test "$(cat keep.txt)" = good
+'
+
+# A failure after staging must still remove the -x temp archive (cleanup runs
+# before exit, not per exit path).
+test_expect_success '-x failure leaves no temp archive in $TMPDIR' '
+	mkdir mytmp && export TMPDIR="$PWD/mytmp" SERVE_SIZE=1024 && serve http &&
+	gp "$URL" -x dest; test "$code" != 0 &&
+	contains "extract" "$out" && test -z "$(ls -A mytmp)"
 '
 
 # A non-tar payload must fail extraction WITHOUT creating the dest tree, so a
@@ -489,6 +516,17 @@ test_expect_success TAR '-x blocks a write through an escaping symlink' '
 # A rootfs tarball legitimately ships absolute symlinks (e.g. Arch bootstrap
 # var/lib/dbus/machine-id -> /etc/machine-id). Those must extract as-is, since
 # nothing writes through them; the rest of the archive unpacks normally.
+# A symlink entry followed by a regular file of the same name: writing the
+# file must replace the link, never follow it out of dest.
+test_expect_success TAR '-x replaces a same-name symlink, never writes through it' '
+	mkdir escape src && ln -s "$PWD/escape/pwned" src/a &&
+	tar cf bad.tar -C src a &&
+	rm src/a && echo PWNED >src/a && tar rf bad.tar -C src a &&
+	export SERVE_FILE="$PWD/bad.tar" && serve http &&
+	gp "$URL" -x dest && test "$code" = 0 &&
+	! test -e escape/pwned && ! test -L dest/a && test "$(cat dest/a)" = PWNED
+'
+
 test_expect_success TAR '-x extracts an inert absolute symlink verbatim' '
 	ln -s /etc/somewhere link && mkdir realdir && echo hi >realdir/f.txt &&
 	tar cf ok.tar link realdir &&

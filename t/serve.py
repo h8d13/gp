@@ -15,6 +15,8 @@
 #               both the probe and every range reply, so gp persists a
 #               .gp-part manifest and a later run can resume. Also answers a
 #               matching If-None-Match with 304, exercising the gp cache.
+#   SERVE_STATUS answer every GET with this status and a short error body,
+#               so failure handling (no clobbered -o file) can be tested.
 #   SERVE_ENCODE advertise this Content-Encoding (gzip/zstd/br) and serve the
 #               already-compressed SERVE_FILE verbatim, with no Accept-Ranges,
 #               to drive gp's --compress decode path.
@@ -34,6 +36,7 @@ ETAG = os.environ.get("SERVE_ETAG", "")
 # compressed) SERVE_FILE bytes verbatim, so gp's --compress decode path can be
 # tested end to end. A compressed response carries no byte ranges.
 ENCODE = os.environ.get("SERVE_ENCODE", "")
+STATUS = int(os.environ.get("SERVE_STATUS", "0"))
 
 
 def pattern(n):
@@ -92,6 +95,13 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _serve(self):
         open("ua", "w").write(self.headers.get("User-Agent", ""))
+        if STATUS:
+            page = b"error page"
+            self.send_response(STATUS)
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+            return
         # Conditional GET: a matching If-None-Match (the validator gp cached
         # from a prior run) means the file is unchanged -> 304, no body. Only
         # the full probe carries it; range requests never do.
