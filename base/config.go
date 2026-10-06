@@ -1,5 +1,5 @@
 // Config and env override logic. Every ini key has an env var
-// equivalent (allow-insecure -> ALLOW_INSECURE); env wins.
+// equivalent (allow-insecure -> GP_ALLOW_INSECURE); env wins.
 package base
 
 import (
@@ -97,9 +97,10 @@ func loadConfig(path string) config {
 	return cfg
 }
 
-// envKey maps an ini key to its env var: allow-insecure -> ALLOW_INSECURE.
+// envKey maps an ini key to its env var: allow-insecure -> GP_ALLOW_INSECURE.
 func envKey(key string) string {
-	return strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
+	// prefixed: bare names like PARALLEL collide with other tools (GNU parallel)
+	return "GP_" + strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
 }
 
 // get returns section/key with env var override taking precedence.

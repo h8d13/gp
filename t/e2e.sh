@@ -8,8 +8,8 @@
 # Each test runs in its own subshell + temp dir, so exported env vars and
 # written config never leak between tests (the Go suite got this from a
 # fresh TempDir per test). XDG_CONFIG_HOME is pinned away from the dev's
-# real ~/.config/gp; ALLOW_INSECURE/ALWAYS_ENCRYPT are scrubbed so a
-# polluted parent shell can't flip outcomes.
+# real ~/.config/gp; every GP_* key is scrubbed so a polluted parent shell
+# can't flip outcomes.
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 GP="$ROOT/out/gp"
@@ -27,7 +27,9 @@ trap 'rm -rf "$LOG" "$TRASH"' EXIT
 # never read the dev's real config; default to an empty XDG dir
 mkdir -p "$TRASH/empty"
 export XDG_CONFIG_HOME="$TRASH/empty"
-unset ALLOW_INSECURE ALWAYS_ENCRYPT USER_AGENT PARALLEL PARALLEL_MIN
+unset GP_ALLOW_INSECURE GP_ALWAYS_ENCRYPT GP_USER_AGENT GP_PROGRESS GP_PARALLEL \
+	GP_PARALLEL_MIN GP_CHUNK_BYTES GP_QUIC GP_COMPRESS GP_RETRIES \
+	GP_RETRY_BASE_MS GP_RETRY_CAP_MS
 
 say() { printf '%s\n' "$*"; }
 test_set_prereq() { test_prereqs="$test_prereqs$1 "; }
@@ -94,12 +96,12 @@ user-agent = gp/1.0
 	test "$(cat "$d/ua")" = gp/1.0
 '
 
-test_expect_success 'USER_AGENT env overrides ini' '
+test_expect_success 'GP_USER_AGENT env overrides ini' '
 	serve http &&
 	write_ini "[user]
 user-agent = gp/1.0
 " &&
-	export USER_AGENT=from-env && gp "$URL" && test "$code" = 0 &&
+	export GP_USER_AGENT=from-env && gp "$URL" && test "$code" = 0 &&
 	test "$(cat "$d/ua")" = from-env
 '
 
@@ -110,9 +112,9 @@ test_expect_success 'config precedence: .env over ini, real env over .env' '
 	write_ini "[user]
 user-agent = from-ini
 " &&
-	printf "USER_AGENT=from-dotenv\n" >.env &&
+	printf "GP_USER_AGENT=from-dotenv\n" >.env &&
 	gp "$URL" && test "$code" = 0 && test "$(cat "$d/ua")" = from-dotenv &&
-	export USER_AGENT=from-env && gp "$URL" && test "$code" = 0 &&
+	export GP_USER_AGENT=from-env && gp "$URL" && test "$code" = 0 &&
 	test "$(cat "$d/ua")" = from-env
 '
 
@@ -135,9 +137,9 @@ always-encrypt = false
 	gp "$HOST" && test "$code" = 0 && contains "http://$HOST" "$out"
 '
 
-test_expect_success 'ALWAYS_ENCRYPT=0 (env) keeps http://' '
+test_expect_success 'GP_ALWAYS_ENCRYPT=0 (env) keeps http://' '
 	serve http &&
-	export ALWAYS_ENCRYPT=0 && gp "$HOST" &&
+	export GP_ALWAYS_ENCRYPT=0 && gp "$HOST" &&
 	test "$code" = 0 && contains "http://$HOST" "$out"
 '
 
@@ -166,9 +168,9 @@ test_expect_success TLS 'self-signed TLS is rejected by default' '
 	test "$code" != 0 && contains certificate "$out"
 '
 
-test_expect_success TLS 'ALLOW_INSECURE=true (env) accepts self-signed' '
+test_expect_success TLS 'GP_ALLOW_INSECURE=true (env) accepts self-signed' '
 	serve tls "$CERT" &&
-	export ALLOW_INSECURE=true && gp "$URL" &&
+	export GP_ALLOW_INSECURE=true && gp "$URL" &&
 	test "$code" = 0 && contains "200 OK" "$out"
 '
 
@@ -181,33 +183,40 @@ allow-insecure = true
 	gp "$URL" && test "$code" = 0 && contains "200 OK" "$out"
 '
 
-test_expect_success TLS 'ALLOW_INSECURE=1 (.env) accepts self-signed' '
+test_expect_success TLS 'GP_ALLOW_INSECURE=1 (.env) accepts self-signed' '
 	serve tls "$CERT" &&
-	printf "ALLOW_INSECURE=1\n" >.env &&
+	printf "GP_ALLOW_INSECURE=1\n" >.env &&
 	gp "$URL" && test "$code" = 0 && contains "200 OK" "$out"
 '
 
 # --- parallel range download -----------------------------------------
 # serve.py: SERVE_SIZE advertises Accept-Ranges; EXPECT barriers N coexisting
 # range requests; it records peak concurrency in the "maxconc" file. The new
-# download path splits by CHUNK_BYTES, so to open N connections the body must
+# download path splits by GP_CHUNK_BYTES, so to open N connections the body must
 # be at least N chunks: chunk = size/N forces exactly N concurrent ranges.
 test_expect_success 'parallel split reassembles and opens N connections' '
-	export SERVE_SIZE=$((256 * 1024)) EXPECT=4 CHUNK_BYTES=$((64 * 1024)) && serve http &&
+	export SERVE_SIZE=$((256 * 1024)) EXPECT=4 GP_CHUNK_BYTES=$((64 * 1024)) && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" && test "$code" = 0 &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" && test "$code" = 0 &&
 	cmp ref.bin out.bin && test "$(cat maxconc)" -ge 4
 '
 
 test_expect_success 'small body stays single-stream (below parallel-min)' '
 	export SERVE_SIZE=4096 && serve http &&
-	export PARALLEL=4 PARALLEL_MIN=1048576 && gp -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1048576 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && test "$(cat maxconc)" = 1
 '
 
-test_expect_success 'PARALLEL=1 disables splitting' '
+# Only GP_-prefixed names apply: a bare PARALLEL (GNU parallel's) is ignored.
+test_expect_success 'unprefixed env names are ignored' '
 	export SERVE_SIZE=$((256 * 1024)) && serve http &&
-	export PARALLEL=1 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	test "$code" = 0 && ! test -e ranges
+'
+
+test_expect_success 'GP_PARALLEL=1 disables splitting' '
+	export SERVE_SIZE=$((256 * 1024)) && serve http &&
+	export GP_PARALLEL=1 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && test "$(cat maxconc)" = 1
 '
 
@@ -222,7 +231,7 @@ test_expect_success '-c chunk size splits into ceil(size/chunk) ranges' '
 	export SERVE_SIZE=$((200 * 1024)) SERVE_ETAG=v1 && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -c $((64 * 1024)) -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -c $((64 * 1024)) -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" = 4 &&
 	test ! -e out.bin.gp-part   # manifest dropped once complete
@@ -236,7 +245,7 @@ test_expect_success 'split without -c auto-sizes to one span per connection' '
 	export SERVE_SIZE=$((256 * 1024)) && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=$((16 * 1024)) &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 GP_CHUNK_BYTES=$((16 * 1024)) &&
 	gp -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" = 4
@@ -249,7 +258,7 @@ test_expect_success 'explicit -c overrides auto-size and pins the span' '
 	export SERVE_SIZE=$((256 * 1024)) && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=$((16 * 1024)) &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 GP_CHUNK_BYTES=$((16 * 1024)) &&
 	gp -c $((16 * 1024)) -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" = 16
@@ -258,13 +267,13 @@ test_expect_success 'explicit -c overrides auto-size and pins the span' '
 # A killed transfer leaves a manifest marking the chunks already on disk;
 # the next run must refetch ONLY the gaps, trusting the bytes it kept.
 test_expect_success 'resume refetches only the missing chunks' '
-	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 CHUNK_BYTES=$((64 * 1024)) &&
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 GP_CHUNK_BYTES=$((64 * 1024)) &&
 	serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	cp ref.bin out.bin &&   # bytes for the done chunks are already correct
 	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,false,true,false]}" >out.bin.gp-part &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	printf "%s\n" "65536-131071" "196608-262143" | sort >expect &&
 	sort -u ranges >got && diff expect got &&
@@ -275,13 +284,13 @@ test_expect_success 'resume refetches only the missing chunks' '
 # discard the on-disk bytes and refetch every chunk, not stitch onto a file
 # that changed underneath it.
 test_expect_success 'resume restarts when the validator changed' '
-	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v2 CHUNK_BYTES=$((64 * 1024)) &&
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v2 GP_CHUNK_BYTES=$((64 * 1024)) &&
 	serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	head -c 262144 /dev/zero >out.bin &&   # stale garbage from a changed remote
 	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,true,true,true]}" >out.bin.gp-part &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" = 4 &&
 	test ! -e out.bin.gp-part
@@ -325,13 +334,13 @@ test_expect_success 'a truncated file is refetched, not served from cache' '
 # A pending resume (a .gp-part manifest on disk) must suppress the conditional:
 # the local file is incomplete, so a 304 "you already have it" would be wrong.
 test_expect_success 'a pending resume suppresses the conditional request' '
-	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 CHUNK_BYTES=$((64 * 1024)) &&
+	export SERVE_SIZE=$((256 * 1024)) SERVE_ETAG=v1 GP_CHUNK_BYTES=$((64 * 1024)) &&
 	serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null &&
 	cp ref.bin out.bin &&
 	printf "%s" "{\"size\":262144,\"validator\":\"v1\",\"chunk\":65536,\"done\":[true,false,true,false]}" >out.bin.gp-part &&
 	printf "%s" "{\"url\":\"$URL\",\"size\":262144,\"etag\":\"v1\"}" >out.bin.gp-meta &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && contains "200 OK" "$out" && cmp ref.bin out.bin
 '
 
@@ -401,9 +410,9 @@ test_expect_success '-z errors clearly on an unsupported deflate encoding' '
 # Without -z the default stays identity: no Accept-Encoding is sent, so the
 # split path still engages on a ranged body (compression never interferes).
 test_expect_success '-z off keeps identity and still splits' '
-	export SERVE_SIZE=$((256 * 1024)) CHUNK_BYTES=$((64 * 1024)) && serve http &&
+	export SERVE_SIZE=$((256 * 1024)) GP_CHUNK_BYTES=$((64 * 1024)) && serve http &&
 	"$GP" -o ref.bin "$URL" >/dev/null && rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 && gp -o out.bin "$URL" &&
 	test "$code" = 0 && cmp ref.bin out.bin &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" = 4
 '
@@ -450,7 +459,7 @@ test_expect_success TAR 'parallel split then -x extracts the reassembled archive
 	tar cf payload.tar -C src . &&
 	export SERVE_FILE="$PWD/payload.tar" && serve http &&
 	rm -f ranges &&
-	export PARALLEL=4 PARALLEL_MIN=1 CHUNK_BYTES=4096 &&
+	export GP_PARALLEL=4 GP_PARALLEL_MIN=1 GP_CHUNK_BYTES=4096 &&
 	gp "$URL" -o arc.tar -x dest && test "$code" = 0 &&
 	test "$(wc -c <dest/big.txt | tr -d " ")" = 20000 &&
 	test "$(sort -u ranges | wc -l | tr -d " ")" -ge 4

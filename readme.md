@@ -49,4 +49,4 @@ Options:
 
 Keys resolve in order:
 
-command-line flags > real `ENV` vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.
+command-line flags > real `GP_*` env vars > `.env` in $CWD > `$XDG_CONFIG_HOME/gp/config.ini` > fallback defaults.
