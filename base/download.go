@@ -67,8 +67,7 @@ func splitSegment(size int64, conns int, chunk int64) int64 {
 	return min(max((size+int64(conns)-1)/int64(conns), chunk), maxSeg)
 }
 
-// saveSplitAuto runs an optimal parallel split of resp into out, and is the one
-// way both download paths (a URL fetch and `up`) start a split. Unless the
+// saveSplitAuto runs an optimal parallel split of resp into out. Unless the
 // segment is pinned it auto-sizes the per-request span from the body size and
 // connection count, and it always runs on a dedicated h1.1 client so each
 // connection gets its own congestion window: an h2/h3 client multiplexes every

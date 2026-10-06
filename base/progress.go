@@ -18,15 +18,12 @@ import (
 // progress reports bytes transferred against an optional total. A nil
 // *progress is a valid no-op, so callers never branch on TTY-ness. The
 // mutable phase fields are atomic so reset() can re-arm the bar from the
-// main goroutine while the render goroutine reads, without a lock. note is a
-// marker appended to the line (e.g. a verify result) that survives reset(), so
-// an instant step too quick for its own phase can still leave a lasting mark.
+// main goroutine while the render goroutine reads, without a lock.
 type progress struct {
 	total     atomic.Int64
 	done      atomic.Int64
 	startNano atomic.Int64
 	label     atomic.Value // string, e.g. "DL" / "XT"
-	note      atomic.Value // string, e.g. "[VF✓]"
 	stop      chan struct{}
 	ended     chan struct{}
 }
@@ -55,16 +52,6 @@ func (p *progress) reset(total int64, label string) {
 	p.total.Store(total)
 	p.startNano.Store(time.Now().UnixNano())
 	p.label.Store(label)
-}
-
-// setNote sets the marker appended to the bar line, shown from the next render
-// on. It is not cleared by reset(), so a one-shot step (verify) can leave a
-// lasting mark that the following phase keeps carrying. Safe on nil.
-func (p *progress) setNote(s string) {
-	if p == nil {
-		return
-	}
-	p.note.Store(s)
 }
 
 // run starts the render loop in the background. Safe to call on nil.
@@ -112,7 +99,6 @@ func (p *progress) finish() {
 func (p *progress) render() {
 	done, total := p.done.Load(), p.total.Load()
 	label, _ := p.label.Load().(string)
-	note, _ := p.note.Load().(string)
 	var speed int64
 	if el := time.Since(time.Unix(0, p.startNano.Load())).Seconds(); el > 0 {
 		speed = int64(float64(done) / el)
@@ -120,14 +106,14 @@ func (p *progress) render() {
 	cols := termCols()
 	var line string
 	if total <= 0 {
-		line = fmt.Sprintf("[%s] %s  %s/s  %s", label, humanBytes(done), humanBytes(speed), note)
+		line = fmt.Sprintf("[%s] %s  %s/s", label, humanBytes(done), humanBytes(speed))
 	} else {
 		// Size the bar to the space left after the surrounding text, capped, so
 		// it shrinks (to nothing) on a narrow terminal instead of overflowing
 		// and wrapping. A wrapped line defeats the \r in-place redraw.
 		frac := float64(done) / float64(total)
 		left := fmt.Sprintf("[%s] %5.1f%% [", label, frac*100)
-		right := fmt.Sprintf("] %s / %s  %s/s  %s", humanBytes(done), humanBytes(total), humanBytes(speed), note)
+		right := fmt.Sprintf("] %s / %s  %s/s", humanBytes(done), humanBytes(total), humanBytes(speed))
 		bw := max(min(24, cols-runeLen(left)-runeLen(right)-1), 0)
 		filled := max(0, min(bw, int(frac*float64(bw))))
 		bar := strings.Repeat("▓", filled) + strings.Repeat("░", bw-filled)

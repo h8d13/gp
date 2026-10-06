@@ -19,36 +19,34 @@ import (
 // flagGroup records one option's aliases so usage prints it once as
 // "-o, --output" instead of a line per name.
 type flagGroup struct {
-	names  []string
-	typ    string
-	usage  string
-	global bool // true: applies to every command (incl. `up`); false: no-verb only
+	names []string
+	typ   string
+	usage string
 }
 
 var flagGroups []flagGroup
 
 // strVar/intVar bind every name to the same target: one definition, many
-// spellings (-o and --output stay in sync). global tags which usage section
-// the flag prints under (see usage()).
-func strVar(p *string, global bool, def, usage string, names ...string) {
+// spellings (-o and --output stay in sync).
+func strVar(p *string, def, usage string, names ...string) {
 	for _, n := range names {
 		flag.StringVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "string", usage, global})
+	flagGroups = append(flagGroups, flagGroup{names, "string", usage})
 }
 
-func intVar(p *int, global bool, def int, usage string, names ...string) {
+func intVar(p *int, def int, usage string, names ...string) {
 	for _, n := range names {
 		flag.IntVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "int", usage, global})
+	flagGroups = append(flagGroups, flagGroup{names, "int", usage})
 }
 
-func boolVar(p *bool, global bool, def bool, usage string, names ...string) {
+func boolVar(p *bool, def bool, usage string, names ...string) {
 	for _, n := range names {
 		flag.BoolVar(p, n, def, usage)
 	}
-	flagGroups = append(flagGroups, flagGroup{names, "", usage, global})
+	flagGroups = append(flagGroups, flagGroup{names, "", usage})
 }
 
 // wasSet reports whether any of names was passed on the command line, so a
@@ -69,29 +67,14 @@ func usage() {
 	out := flag.CommandLine.Output()
 	name := filepath.Base(os.Args[0])
 	fmt.Fprintf(out, "Usage: %s [flags] URL\n", name)
-	fmt.Fprintf(out, "       %s up [flags]\n", name)
-
-	// Verbs first, then flags split by scope: global flags work for every
-	// command (the URL form and `up`); download flags only for the URL form.
-	fmt.Fprintf(out, "\nCommands:\n")
-	fmt.Fprintf(out, "  %s up\n    \tinstall/update all tools from sources.ini\n", name)
-	fmt.Fprintf(out, "  %s up check\n    \tresolve every source over the network, without downloading\n", name)
-	fmt.Fprintf(out, "  %s rm NAME...\n    \tforget a source's recorded version (prints its dest; deletes no files)\n", name)
-
-	fmt.Fprintf(out, "\nGlobal options (all commands):\n")
-	printFlags(out, true)
-
-	fmt.Fprintf(out, "\nDownload options (URL form only):\n")
-	printFlags(out, false)
+	fmt.Fprintf(out, "\nOptions:\n")
+	printFlags(out)
 }
 
-// printFlags renders the flag groups whose scope matches global, one line per
-// option with its aliases collapsed ("-o, --output").
-func printFlags(out io.Writer, global bool) {
+// printFlags renders one line per option with its aliases collapsed
+// ("-o, --output").
+func printFlags(out io.Writer) {
 	for _, g := range flagGroups {
-		if g.global != global {
-			continue
-		}
 		var spell []string
 		for _, n := range g.names {
 			if len(n) == 1 {
@@ -123,9 +106,7 @@ func tlsConfig(p prefs) *tls.Config {
 }
 
 // setUserAgent sets req's User-Agent to ua, or leaves Go's default when ua is
-// empty. gp's own requests pass the configured UA (possibly empty); forge API
-// requests default ua to a non-empty value first, since forges reject a
-// missing User-Agent.
+// empty.
 func setUserAgent(req *http.Request, ua string) {
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
@@ -234,23 +215,23 @@ func urlScheme(url string, encrypt bool) string {
 // Main is the CLI entry point, invoked by the root package's main().
 func Main() {
 	var out string
-	strVar(&out, false, "", "save the response body to this path (otherwise stdout)", "o", "output")
+	strVar(&out, "", "save the response body to this path (otherwise stdout)", "o", "output")
 	var par int
-	intVar(&par, true, -1, "parallel connections; 1 disables", "p", "parallel")
+	intVar(&par, -1, "parallel connections; 1 disables", "p", "parallel")
 	var useQuic bool
-	boolVar(&useQuic, true, false, "use HTTP/3 over QUIC", "q", "quic")
+	boolVar(&useQuic, false, "use HTTP/3 over QUIC", "q", "quic")
 	var compress bool
-	boolVar(&compress, true, false, "accept gzip/zstd/br transfer encoding (disables ranges/resume/304)", "z", "compress")
+	boolVar(&compress, false, "accept gzip/zstd/br transfer encoding (disables ranges/resume/304)", "z", "compress")
 	var ret int
-	intVar(&ret, true, -1, "retries on 429/503; 0 disables", "r", "retries")
+	intVar(&ret, -1, "retries on 429/503; 0 disables", "r", "retries")
 	var chk int
-	intVar(&chk, true, -1, "split/resume chunk size in bytes", "c", "chunk")
+	intVar(&chk, -1, "split/resume chunk size in bytes", "c", "chunk")
 	var noProg bool
-	boolVar(&noProg, true, false, "disable the live download progress line", "n", "no-progress")
+	boolVar(&noProg, false, "disable the live download progress line", "n", "no-progress")
 	var extract string
-	strVar(&extract, false, "", "unpack the downloaded tar (gz/zst/xz/bz2) into this dir", "x", "extract")
+	strVar(&extract, "", "unpack the downloaded tar (gz/zst/xz/bz2) into this dir", "x", "extract")
 	var force bool
-	boolVar(&force, false, false, "re-download even if the cached copy is still current", "f", "force")
+	boolVar(&force, false, "re-download even if the cached copy is still current", "f", "force")
 	flag.Usage = usage
 	posArgs := parseArgs()
 
@@ -276,24 +257,6 @@ func Main() {
 	chunkSet := wasSet("c", "chunk")
 	if noProg {
 		p.Progress = false
-	}
-
-	// `up` installs/updates every source (the download flags -p/-q/-r/-c/-n
-	// shape its fetches too); `up check` resolves every source over the network
-	// without downloading. `rm NAME...` forgets a source's recorded version. An
-	// unknown `up X` is an error rather than a silent full install (a stray `up
-	// rm`).
-	if len(posArgs) > 0 && posArgs[0] == "up" {
-		if len(posArgs) > 1 && posArgs[1] != "check" {
-			fmt.Fprintf(os.Stderr, "gp up: unknown subcommand %q (use `gp rm NAME` to uninstall)\n", posArgs[1])
-			os.Exit(2)
-		}
-		upMain(p, len(posArgs) > 1)
-		return
-	}
-	if len(posArgs) > 0 && posArgs[0] == "rm" {
-		rmMain(posArgs[1:])
-		return
 	}
 
 	// No URL: a missing positional almost always means a flag swallowed it

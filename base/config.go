@@ -47,7 +47,7 @@ type prefs struct {
 // Precedence: real env > .env > ini > default.
 func loadPrefs(iniPath, envPath string) prefs {
 	loadDotEnv(envPath)
-	cfg, _ := loadConfig(iniPath)
+	cfg := loadConfig(iniPath)
 	return prefs{
 		AllowInsecure: cfg.boolOr("pref", "allow-insecure", false),
 		AlwaysEncrypt: cfg.boolOr("pref", "always-encrypt", true),
@@ -66,16 +66,12 @@ func loadPrefs(iniPath, envPath string) prefs {
 
 type config map[string]map[string]string
 
-// loadConfig parses the ini file once. Missing file means empty config. order
-// holds the section names in the order they appear, so a caller can iterate in
-// file order instead of the map's random order (callers that don't care ignore
-// it).
-func loadConfig(path string) (config, []string) {
+// loadConfig parses the ini file once. Missing file means empty config.
+func loadConfig(path string) config {
 	cfg := config{}
-	var order []string
 	f, err := os.Open(path)
 	if err != nil {
-		return cfg, order
+		return cfg
 	}
 	defer f.Close()
 
@@ -90,7 +86,6 @@ func loadConfig(path string) (config, []string) {
 			section = strings.Trim(line, "[]")
 			if cfg[section] == nil {
 				cfg[section] = map[string]string{}
-				order = append(order, section)
 			}
 			continue
 		}
@@ -98,7 +93,7 @@ func loadConfig(path string) (config, []string) {
 			cfg[section][strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	return cfg, order
+	return cfg
 }
 
 // envKey maps an ini key to its env var: allow-insecure -> ALLOW_INSECURE.

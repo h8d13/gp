@@ -3,7 +3,7 @@
 `get-packets` is a `go` CLI that fetches over HTTP/1, HTTP/2, and HTTP/3.
 
 > Inspired by some of [curl](https://github.com/curl/curl).
-> Also doubles as a **sources and extract** manager. **HTTP Only**.
+> Also extracts tarballs (`-x`). **HTTP Only**.
 
 ## Setup
 
@@ -14,7 +14,7 @@ cd gp
 go build
 ```
 
-See [config](./config.ini) and [sources](./sources.ini) for examples.
+See [config](./config.ini) for an example.
 
 ---
 <!-- gp-help:begin (generated; edit flags or gen-readme.sh, not below) -->
@@ -23,17 +23,10 @@ See [config](./config.ini) and [sources](./sources.ini) for examples.
 
 ```
 Usage: gp [flags] URL
-       gp up [flags]
 
-Commands:
-  gp up
-    	install/update all tools from sources.ini
-  gp up check
-    	resolve every source over the network, without downloading
-  gp rm NAME...
-    	forget a source's recorded version (prints its dest; deletes no files)
-
-Global options (all commands):
+Options:
+  -o, --output string
+    	save the response body to this path (otherwise stdout)
   -p, --parallel int
     	parallel connections; 1 disables
   -q, --quic
@@ -46,10 +39,6 @@ Global options (all commands):
     	split/resume chunk size in bytes
   -n, --no-progress
     	disable the live download progress line
-
-Download options (URL form only):
-  -o, --output string
-    	save the response body to this path (otherwise stdout)
   -x, --extract string
     	unpack the downloaded tar (gz/zst/xz/bz2) into this dir
   -f, --force
